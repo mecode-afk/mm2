@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import asyncio
 import logging
 import random
@@ -2945,7 +2943,7 @@ class CasinoBot:
         
         @self.router.message(Command("stats"))
         async def cmd_stats(message: Message):
-            if self.db.is_user_banned(callback.from_user.id):
+            if self.db.is_user_banned(message.from_user.id):
                 await message.answer(
                     "<tg-emoji emoji-id='5240241223632954241'>🚫</tg-emoji> <b>Вы были заблокированы</b>\n\n"
                     "<tg-emoji emoji-id='5397782960512444700'>📌</tg-emoji> Если вы считаете это ошибкой обратитесь к админу @casinomayami\n\n"
@@ -2990,7 +2988,7 @@ class CasinoBot:
         
         @self.router.message(Command("bonus"))
         async def cmd_bonus_info(message: Message):
-            if self.db.is_user_banned(callback.from_user.id):
+            if self.db.is_user_banned(message.from_user.id):
                 await message.answer(
                     "<tg-emoji emoji-id='5240241223632954241'>🚫</tg-emoji> <b>Вы были заблокированы</b>\n\n"
                     "<tg-emoji emoji-id='5397782960512444700'>📌</tg-emoji> Если вы считаете это ошибкой обратитесь к админу @casinomayami\n\n"
