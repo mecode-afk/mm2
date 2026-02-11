@@ -2945,7 +2945,7 @@ class CasinoBot:
         
         @self.router.message(Command("stats"))
         async def cmd_stats(message: Message):
-            if self.db.is_user_banned(user_id):
+            if self.db.is_user_banned(callback.from_user.id):
                 await message.answer(
                     "<tg-emoji emoji-id='5240241223632954241'>🚫</tg-emoji> <b>Вы были заблокированы</b>\n\n"
                     "<tg-emoji emoji-id='5397782960512444700'>📌</tg-emoji> Если вы считаете это ошибкой обратитесь к админу @casinomayami\n\n"
@@ -2990,7 +2990,7 @@ class CasinoBot:
         
         @self.router.message(Command("bonus"))
         async def cmd_bonus_info(message: Message):
-            if self.db.is_user_banned(user_id):
+            if self.db.is_user_banned(callback.from_user.id):
                 await message.answer(
                     "<tg-emoji emoji-id='5240241223632954241'>🚫</tg-emoji> <b>Вы были заблокированы</b>\n\n"
                     "<tg-emoji emoji-id='5397782960512444700'>📌</tg-emoji> Если вы считаете это ошибкой обратитесь к админу @casinomayami\n\n"
@@ -3373,7 +3373,7 @@ class CasinoBot:
         
         @self.router.callback_query(F.data == "play")
         async def play_menu(callback: CallbackQuery):
-            if self.db.is_user_banned(user_id):
+            if self.db.is_user_banned(callback.from_user.id):
                 await message.answer(
                     "<tg-emoji emoji-id='5240241223632954241'>🚫</tg-emoji> <b>Вы были заблокированы</b>\n\n"
                     "<tg-emoji emoji-id='5397782960512444700'>📌</tg-emoji> Если вы считаете это ошибкой обратитесь к админу @casinomayami\n\n"
@@ -3396,7 +3396,7 @@ class CasinoBot:
         
         @self.router.callback_query(F.data == "profile")
         async def profile_menu(callback: CallbackQuery):
-            if self.db.is_user_banned(user_id):
+            if self.db.is_user_banned(callback.from_user.id):
                 await message.answer(
                     "<tg-emoji emoji-id='5240241223632954241'>🚫</tg-emoji> <b>Вы были заблокированы</b>\n\n"
                     "<tg-emoji emoji-id='5397782960512444700'>📌</tg-emoji> Если вы считаете это ошибкой обратитесь к админу @casinomayami\n\n"
@@ -4004,7 +4004,7 @@ class CasinoBot:
         
         @self.router.callback_query(F.data == "deposit")
         async def deposit_menu(callback: CallbackQuery):
-            if self.db.is_user_banned(user_id):
+            if self.db.is_user_banned(callback.from_user.id):
                 await message.answer(
                     "<tg-emoji emoji-id='5240241223632954241'>🚫</tg-emoji> <b>Вы были заблокированы</b>\n\n"
                     "<tg-emoji emoji-id='5397782960512444700'>📌</tg-emoji> Если вы считаете это ошибкой обратитесь к админу @casinomayami\n\n"
@@ -4101,7 +4101,7 @@ class CasinoBot:
         
         @self.router.callback_query(F.data == "withdraw")
         async def withdraw_menu(callback: CallbackQuery):
-            if self.db.is_user_banned(user_id):
+            if self.db.is_user_banned(callback.from_user.id):
                 await message.answer(
                     "<tg-emoji emoji-id='5240241223632954241'>🚫</tg-emoji> <b>Вы были заблокированы</b>\n\n"
                     "<tg-emoji emoji-id='5397782960512444700'>📌</tg-emoji> Если вы считаете это ошибкой обратитесь к админу @casinomayami\n\n"
