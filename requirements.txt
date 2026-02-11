@@ -2,4 +2,3 @@ aiogram==3.25.0
 telethon
 aiohttp==3.9.5
 cryptography>=41.0.0
-python-dotenv>=1.0.0
