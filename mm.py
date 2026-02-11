@@ -5092,6 +5092,7 @@ ID инвойса: {invoice['invoice_id']}
         logger.info("Cleanup completed")
 
 async def main():
+    """Точка входа в приложение"""
     try:
         bot = CasinoBot()
         await bot.start()
@@ -5109,4 +5110,5 @@ if __name__ == "__main__":
         logger.warning("⚠️  TELEGRAM_API_HASH не настроен!")
     if Config.TELEGRAM_PHONE == "+79991234567":
         logger.warning("⚠️  TELEGRAM_PHONE не настроен!")
+    
     asyncio.run(main())
