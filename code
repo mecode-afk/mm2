@@ -291,23 +291,32 @@ def use_promocode(code, user_id):
         
         amount = promocode['amount']
         
-        result = update_user_balance(user_id, amount, "promo")
+        if user_id_str not in data['menu_users']:
+            get_or_create_user(user_id)
+            data = load_db()
         
-        if not result:
-            return None, "❌ Ошибка при начислении баланса"
+        old_balance = data['menu_users'][user_id_str]['balance']
+        data['menu_users'][user_id_str]['balance'] += amount
+        
+        data['transactions'].append({
+            'user_id': user_id_str,
+            'type': 'promo',
+            'amount': amount,
+            'old_balance': old_balance,
+            'new_balance': data['menu_users'][user_id_str]['balance'],
+            'promocode': code,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
         
         promocode['used_by'].append(user_id_str)
         promocode['uses_left'] = uses_left - 1
         
-        if user_id_str in data['menu_users']:
-            if 'used_promocodes' not in data['menu_users'][user_id_str]:
-                data['menu_users'][user_id_str]['used_promocodes'] = []
-            if code not in data['menu_users'][user_id_str]['used_promocodes']:
-                data['menu_users'][user_id_str]['used_promocodes'].append(code)
+        if 'used_promocodes' not in data['menu_users'][user_id_str]:
+            data['menu_users'][user_id_str]['used_promocodes'] = []
+        if code not in data['menu_users'][user_id_str]['used_promocodes']:
+            data['menu_users'][user_id_str]['used_promocodes'].append(code)
         
         save_db(data)
-        
-        user_data = get_or_create_user(user_id)
         
         return amount, f"✅ Промокод активирован! +{amount} RUB"
         
