@@ -206,6 +206,8 @@ def update_user_balance(user_id, amount, transaction_type="deposit", **kwargs):
     elif transaction_type == "deposit_completed":
         user_data['balance'] += amount
         user_data['total_deposited'] += amount
+    elif transaction_type == "referral_bonus":
+        user_data['balance'] += amount
     else:
         logger.error(f"[BALANCE] Unknown type: {transaction_type}")
         return False
