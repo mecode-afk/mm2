@@ -1,0 +1,4451 @@
+﻿import asyncio
+import logging
+import json
+import os
+import re
+import aiohttp
+from datetime import datetime
+from typing import Dict, Any, Callable, List, Optional, Union
+import random
+
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery, Dice, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.deep_linking import create_start_link, decode_payload
+from aiogram.enums import ParseMode, ChatType
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+GROUP_LINK = "https://t.me/+iQnjriiA_z8wNDMy"
+NOTIFICATION_CHAT_ID = -1003849301229
+
+BOT_TOKEN = "7998002114:AAEBVNE45mo3tmCbLjx2hSkEwNglJf-ZaQs"
+CRYPTOBOT_API_TOKEN = "562662:AApFtKjizEzph6lWXLH21PbVh60nQiYfCgc"
+ADMIN_ID = 1164671444
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+
+MIN_WITHDRAWAL = 100.0
+THRESHOLD = 300.0
+USDT_RATE = 80.0
+SUPPORT_URL = "https://t.me/kyzayshop"
+GAME_FEE = 0.05
+
+
+last_message_time = {}
+MESSAGE_DELAY = 1.5  
+
+PHOTOS = {
+    "start": "AgACAgIAAxkBAAMGadJN6cdGykV2eCUzZGtXRsLyBV0AAu8UaxuN01lK6KEnWTDDlA0BAAMCAAN5AAM7BA",
+    "menu": "AgACAgIAAxkBAAMGadJN6cdGykV2eCUzZGtXRsLyBV0AAu8UaxuN01lK6KEnWTDDlA0BAAMCAAN5AAM7BA",
+    "games": "AgACAgIAAxkBAAMDadJNhGiViC_6Fkak4clqKlFIihYAAu4UaxuN01lKSbYPCCWxP_8BAAMCAAN5AAM7BA",
+    "profile": "AgACAgIAAxkBAAMIadJN9HYcxSEAATJwi2THBt-UMuixAALsFGsbjdNZSh7gh2BboY9OAQADAgADeQADOwQ",
+    "deposit": "AgACAgIAAxkBAAMEadJNlpigzvBAGfLed2YFRyxcNooAAu0UaxuN01lKmjpdXszoU6YBAAMCAAN5AAM7BA",
+    "withdraw": "AgACAgIAAxkBAAMKadJOCp9efUBJpqRwLQ8L3dXE9bIAAusUaxuN01lKakNIq5vojD4BAAMCAAN5AAM7BA"
+}
+
+DB_FILE = "bot_data.json"
+
+class DepositStates(StatesGroup):
+    waiting_amount = State()
+
+class WithdrawStates(StatesGroup):
+    waiting_amount = State()
+
+class Game21States(StatesGroup):
+    waiting_decision = State() 
+
+class UserStates(StatesGroup):
+    waiting_bet_amount = State()
+
+
+def load_db():
+    default_db = {
+        "menu_users": {},
+        "games": {},
+        "game_counter": 0,
+        "promocodes": {},
+        "transactions": [],
+        "referral_bonuses": {},
+        "deposits": [],
+        "withdrawals": [],
+        "last_dump": None
+    }
+    
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if not content:
+                    save_db(default_db)
+                    return default_db
+                
+                loaded_data = json.loads(content)
+                
+                for key in default_db:
+                    if key not in loaded_data:
+                        loaded_data[key] = default_db[key]
+                        
+                return loaded_data
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка декодирования JSON в БД: {e}. Создаем новую БД.")
+            save_db(default_db)
+            return default_db
+        except Exception as e:
+            logger.error(f"Ошибка загрузки БД: {e}. Создаем новую БД.")
+            save_db(default_db)
+            return default_db
+    else:
+        save_db(default_db)
+        return default_db
+
+def save_db(data):
+    try:
+        def convert_datetime(obj):
+            if isinstance(obj, datetime):
+                return obj.strftime("%Y-%m-%d %H:%M:%S")
+            raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+        
+        with open(DB_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=convert_datetime)
+        
+        with open(DB_FILE, 'r', encoding='utf-8') as f:
+            verify = json.load(f)
+        
+        if verify:
+            logger.info(f"[DB] Saved OK, size: {os.path.getsize(DB_FILE)} bytes")
+            return True
+        else:
+            logger.error(f"[DB] Save verification failed!")
+            return False
+            
+    except Exception as e:
+        logger.error(f"[DB] ERROR: {e}", exc_info=True)
+        return False
+
+def get_or_create_user(user_id, username=""):
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    logger.info(f"[DEBUG] get_or_create_user: user={user_id_str}, username={username}")
+    
+    if user_id_str not in data['menu_users']:
+        logger.info(f"[DEBUG] Creating new user: {user_id_str}")
+        data['menu_users'][user_id_str] = {
+            'username': username or f"user_{user_id}",
+            'balance': 0.0,
+            'registered': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'referrer': None,
+            'referrals': 0,
+            'referrals_list': [],
+            'total_spent': 0,
+            'total_deposited': 0,
+            'total_withdrawn': 0,
+            'total_referral_income': 0.0,
+            'used_promocodes': [],
+            'currency': 'RUB'
+        }
+        save_db(data)
+        logger.info(f"[DEBUG] New user created with balance: 0.0")
+    
+    return data['menu_users'][user_id_str]
+
+def calculate_winnings_with_fee(pot):
+    fee = pot * GAME_FEE
+    net_winnings = pot - fee
+    return net_winnings, fee
+
+def update_user_balance(user_id, amount, transaction_type="deposit", **kwargs):
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    logger.info(f"[BALANCE] {user_id_str} {transaction_type} {amount}")
+    
+    if user_id_str not in data['menu_users']:
+        logger.error(f"[BALANCE] User {user_id_str} not found!")
+        return False
+    
+    user_data = data['menu_users'][user_id_str]
+    old_balance = user_data['balance']
+    
+    if transaction_type == "deposit":
+        user_data['balance'] += amount
+        user_data['total_deposited'] += amount
+    elif transaction_type == "withdraw":
+        if user_data['balance'] >= amount:
+            user_data['balance'] -= amount
+            user_data['total_withdrawn'] += amount
+        else:
+            return False
+    elif transaction_type == "game_bet":
+        if user_data['balance'] >= amount:
+            user_data['balance'] -= amount
+            user_data['total_spent'] += amount
+        else:
+            return False
+    elif transaction_type == "game_win":
+        user_data['balance'] += amount
+    elif transaction_type == "gift_sent":
+        if user_data['balance'] >= amount:
+            user_data['balance'] -= amount
+        else:
+            return False
+    elif transaction_type == "gift_received":
+        user_data['balance'] += amount
+    elif transaction_type == "promo":
+        user_data['balance'] += amount
+    elif transaction_type == "deposit_completed":
+        user_data['balance'] += amount
+        user_data['total_deposited'] += amount
+    else:
+        logger.error(f"[BALANCE] Unknown type: {transaction_type}")
+        return False
+    
+    transaction = {
+        'user_id': user_id_str,
+        'type': transaction_type,
+        'amount': amount,
+        'old_balance': old_balance,
+        'new_balance': user_data['balance'],
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    for key, value in kwargs.items():
+        if value is not None:
+            transaction[key] = value
+    
+    data['transactions'].append(transaction)
+    
+    save_success = save_db(data)
+    
+    if save_success:
+        logger.info(f"[BALANCE] OK: {old_balance} -> {user_data['balance']} (+{amount})")
+        return True
+    else:
+        logger.error(f"[BALANCE] FAILED to save!")
+        return False
+
+def get_user_balance(user_id):
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    if user_id_str in data['menu_users']:
+        return data['menu_users'][user_id_str]['balance']
+    else:
+        user_data = get_or_create_user(user_id)
+        return user_data['balance']
+
+def get_bottom_menu():
+    keyboard = [
+        [types.KeyboardButton(text="GAMES"), types.KeyboardButton(text="CASES")],
+        [types.KeyboardButton(text="INFO"), types.KeyboardButton(text="PROFILE"), types.KeyboardButton(text="СЛУЖБА ПОДДЕРЖКИ")]
+    ]
+    return types.ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def create_promocode(code, amount, uses_left=1):  
+    try:
+        data = load_db()
+        code = code.upper()
+        
+        data['promocodes'][code] = {
+            'amount': float(amount),
+            'uses_left': uses_left,
+            'used_by': [],  
+            'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        save_db(data)
+        return True, "Успешно"
+    except Exception as e:
+        return False, f"Ошибка: {e}"
+
+def use_promocode(code, user_id):
+    try:
+        data = load_db()
+        code = code.upper()
+        user_id_str = str(user_id)
+        
+        if code not in data['promocodes']:
+            return None, "❌ Промокод не найден"
+        
+        promocode = data['promocodes'][code]
+        
+        uses_left = promocode.get('uses_left', 0)
+        if uses_left == 0:
+            return None, "❌ Промокод уже использован максимальное количество раз"
+        
+        used_by = promocode.get('used_by', [])
+        if user_id_str in used_by:
+            return None, "❌ Вы уже использовали этот промокод"
+        
+        amount = promocode['amount']
+        
+        result = update_user_balance(user_id, amount, "promo")
+        
+        if not result:
+            return None, "❌ Ошибка при начислении баланса"
+        
+        promocode['used_by'].append(user_id_str)
+        promocode['uses_left'] = uses_left - 1
+        
+        if user_id_str in data['menu_users']:
+            if 'used_promocodes' not in data['menu_users'][user_id_str]:
+                data['menu_users'][user_id_str]['used_promocodes'] = []
+            if code not in data['menu_users'][user_id_str]['used_promocodes']:
+                data['menu_users'][user_id_str]['used_promocodes'].append(code)
+        
+        save_db(data)
+        
+        user_data = get_or_create_user(user_id)
+        
+        return amount, f"✅ Промокод активирован! +{amount} RUB"
+        
+    except Exception as e:
+        logger.error(f"Ошибка промокода: {e}", exc_info=True)
+        return None, f"❌ Ошибка: {e}"
+
+
+
+@dp.message(Command("reset_balance", "resetbal", "rb"))
+async def cmd_reset_balance(message: Message, command: CommandObject = None):
+
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Эта команда только для администратора!")
+        return
+    
+    if not command or not command.args:
+        await message.answer(
+            "❌ Формат: /reset_balance @username или ID\n"
+            "Примеры:\n"
+            "/reset_balance @username\n"
+            "/reset_balance 123456789\n"
+            "/reset_balance @username 0 (обнулить)\n"
+            "/reset_balance 123456789 100 (установить на 100)"
+        )
+        return
+    
+    args = command.args.split()
+    identifier = args[0]
+    new_balance = 0.0
+    
+    if len(args) > 1:
+        try:
+            new_balance = float(args[1].replace(',', '.'))
+        except ValueError:
+            await message.answer("❌ Неверная сумма! Введите число. Например: 0 или 100.50")
+            return
+    
+    try:
+        data = load_db()
+        user_id_str = None
+        user_data = None
+        
+        if identifier.startswith('@'):
+            username = identifier[1:].lower()
+            for uid, user in data['menu_users'].items():
+                if user.get('username', '').lower() == username:
+                    user_id_str = uid
+                    user_data = user
+                    break
+        else:
+            user_id_str = identifier
+            user_data = data['menu_users'].get(user_id_str)
+        
+        if not user_data:
+            await message.answer(f"❌ Пользователь {identifier} не найден!")
+            return
+        
+        old_balance = user_data['balance']
+        
+        user_data['balance'] = new_balance
+        
+        data['transactions'].append({
+            'user_id': user_id_str,
+            'type': 'admin_balance_adjustment',
+            'old_balance': old_balance,
+            'new_balance': new_balance,
+            'admin_id': message.from_user.id,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'note': f"Админ {message.from_user.id} изменил баланс"
+        })
+        
+        save_db(data)
+        
+        username = user_data.get('username', f'user_{user_id_str}')
+        response = (f"✅ Баланс пользователя @{username} (ID: {user_id_str}) изменен:\n"
+                   f"💰 Было: {old_balance:.2f} RUB\n"
+                   f"💰 Стало: {new_balance:.2f} RUB")
+        
+        await message.answer(response)
+        
+        try:
+            await bot.send_message(
+                int(user_id_str),
+                f"⚠️ Ваш баланс был изменен администратором:\n"
+                f"💰 Было: {old_balance:.2f} RUB\n"
+                f"💰 Стало: {new_balance:.2f} RUB\n\n"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления пользователю: {e}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка сброса баланса: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@dp.message(Command("clean_games"))
+async def clean_games(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Только для админа!")
+        return
+    
+    data = load_db()
+    games_to_delete = []
+    
+    for game_id, game in data['games'].items():
+        if game.get('status') == 'playing' and game.get('waiting_for_throw'):
+            games_to_delete.append(game_id)
+            logger.info(f"Удаляем зависшую игру #{game_id}")
+    
+    for game_id in games_to_delete:
+        del data['games'][game_id]
+    
+    if games_to_delete:
+        save_db(data)
+        await message.answer(f"✅ Очищено {len(games_to_delete)} зависших игр")
+    else:
+        await message.answer("✅ Нет зависших игр")
+
+@dp.message(Command("dump"))
+async def cmd_dump(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("❌ Эта команда только для администратора!")
+        return
+    
+    try:
+        data = load_db()
+        
+        data['last_dump'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_db(data)
+        
+        dump_file = f"bot_dump_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        with open(dump_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        
+        with open(dump_file, 'rb') as f:
+            await message.reply_document(
+                document=types.FSInputFile(dump_file),
+                caption=f"📊 Дамп базы данных\n\n"
+                       f"👥 Пользователей: {len(data['menu_users'])}\n"
+                       f"🎲 Активных игр: {len(data['games'])}\n"
+                       f"💳 Транзакций: {len(data['transactions'])}\n"
+                       f"🎟 Промокодов: {len(data['promocodes'])}\n\n"
+                       f"🕐 Время дампа: {data['last_dump']}"
+            )
+        
+        os.remove(dump_file)
+        
+        logger.info(f"Админ {message.from_user.id} выгрузил базу данных")
+        
+    except Exception as e:
+        logger.error(f"Ошибка дампа базы данных: {e}")
+        await message.reply(f"❌ Ошибка выгрузки базы данных: {e}")
+
+@dp.message(Command("set_promo"))
+async def cmd_set_promo(message: types.Message, command: CommandObject):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Эта команда только для администратора!")
+        return
+    
+    if not command.args:
+        await message.answer("❌ Формат: /set_promo КОД СУММА [КОЛИЧЕСТВО_АКТИВАЦИЙ]\nПример: /set_promo BONUS100 100 1")
+        return
+    
+    args = command.args.split()
+    if len(args) < 2:
+        await message.answer("❌ Формат: /set_promo КОД СУММА [КОЛИЧЕСТВО_АКТИВАЦИЙ]\nПример: /set_promo BONUS100 100 1")
+        return
+    
+    code = args[0].upper()
+    
+    try:
+        amount = float(args[1].replace(',', '.'))
+    except ValueError:
+        await message.answer("❌ Неверная сумма! Введите число. Например: 100 или 100.50")
+        return
+    
+    uses = 1
+    if len(args) == 3:
+        try:
+            uses = int(args[2])
+            if uses < 1:
+                await message.answer("❌ Количество активаций должно быть больше 0")
+                return
+        except ValueError:
+            await message.answer("❌ Неверное количество активаций! Введите целое число.")
+            return
+    
+    success, msg = create_promocode(code, amount, uses)
+    if success:
+        if uses == 1:
+            await message.answer(f"✅ Промокод {code} создан!\n💰 Сумма: {amount} RUB\n📊 Количество активаций: {uses} (одноразовый)")
+        else:
+            await message.answer(f"✅ Промокод {code} создан!\n💰 Сумма: {amount} RUB\n📊 Количество активаций: {uses}")
+    else:
+        await message.answer(f"❌ Ошибка создания промокода: {msg}")
+
+
+@dp.message(Command("pending"))
+async def cmd_pending(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Эта команда только для администратора!")
+        return
+    
+    data = load_db()
+    
+    pending_withdrawals = [w for w in data.get('withdrawals', []) if w.get('status') == 'pending']
+    
+    if not pending_withdrawals:
+        await message.answer("✅ Нет ожидающих выводов")
+        return
+    
+    text = "📋 Ожидающие выводы:\n\n"
+    
+    for w in pending_withdrawals:
+        user_id = w.get('user_id')
+        user_data = data['menu_users'].get(str(user_id), {})
+        username = user_data.get('username', 'Неизвестно')
+        text += f"🆔 ID: {w.get('id')}\n👤 @{username}\n💰 {w.get('amount', 0):.2f} RUB\n\n"
+    
+    await message.answer(text)
+
+
+@dp.message(Command("promo"))
+async def cmd_promo(message: types.Message, command: CommandObject):
+    if not command.args:
+        await message.answer("❌ Укажите промокод!\nПример: /promo BONUS100")
+        return
+    
+    code = command.args.strip().upper()
+    amount, message_text = use_promocode(code, message.from_user.id)
+    
+    if amount is None:
+        await message.answer(f"{message_text}")
+    else:
+        user_data = get_or_create_user(message.from_user.id, message.from_user.username or "")
+        
+        await message.answer(
+            f"{message_text}\n\n"
+            f"💰 Ваш текущий баланс: {user_data['balance']:.2f} RUB"
+        )
+
+@dp.message(Command("ref"))
+async def cmd_ref(message: types.Message):
+    user_id = str(message.from_user.id)
+    user_data = get_or_create_user(message.from_user.id)
+    
+    try:
+        ref_link = await create_start_link(bot, user_id, encode=True)
+    except Exception as e:
+        logger.error(f"Ошибка создания реф. ссылки: {e}")
+        ref_link = f"https://t.me/{(await bot.get_me()).username}?start={user_id}"
+    
+    referrals_list = ""
+    if user_data['referrals_list']:
+        for i, ref_id in enumerate(user_data['referrals_list'][:10], 1):
+            data = load_db()
+            ref_data = data['menu_users'].get(str(ref_id), {})
+            ref_name = ref_data.get('username', f'user_{ref_id}')
+            referrals_list += f"{i}. @{ref_name}\n"
+        if len(user_data['referrals_list']) > 10:
+            referrals_list += f"... и еще {len(user_data['referrals_list']) - 10} рефералов"
+    else:
+        referrals_list = "У вас пока нет рефералов"
+    
+    response = (
+        f"📊 Ваша реферальная статистика:\n\n"
+        f"🔗 Ссылка: {ref_link}\n\n"
+        f"👥 Всего рефералов: {user_data['referrals']}\n"
+        f"💰 Доход от рефералов: {user_data.get('total_referral_income', 0):.2f} RUB\n\n"
+        f"📋 Список рефералов:\n{referrals_list}\n\n"
+        f"🎯 Вы получаете 2% от каждого депозита ваших рефералов!"
+    )
+    
+    await message.answer(response)
+
+@dp.message(Command("gift"))
+async def cmd_gift(message: Message, command: CommandObject = None):
+
+    try:
+        text = message.text.strip()
+        
+        if text.startswith('/gift'):
+            text = text[5:].strip()
+        elif text.startswith('/gift@'):
+            text = text[text.find(' '):].strip()
+        
+        parts = text.split()
+        
+        if message.reply_to_message:
+            if message.reply_to_message.from_user.is_bot:
+                await message.reply("❌ Нельзя дарить баланс боту")
+                return
+            
+            if message.reply_to_message.from_user.id == message.from_user.id:
+                await message.reply("❌ Нельзя дарить подарок самому себе")
+                return
+            
+            if len(parts) != 1:
+                await message.reply(
+                    "❌ Используйте: /gift 100\n"
+                    "(ответьте на сообщение получателя)"
+                )
+                return
+            
+            try:
+                amount = float(parts[0].replace(',', '.'))
+            except ValueError:
+                await message.reply("❌ Неверная сумма. Пример: /gift 100 или /gift 100.50")
+                return
+            
+            sender_id = message.from_user.id
+            receiver_id = message.reply_to_message.from_user.id
+            
+            await process_gift(
+                message, 
+                sender_id, 
+                receiver_id, 
+                amount,
+                receiver_username=message.reply_to_message.from_user.username or 
+                                message.reply_to_message.from_user.first_name
+            )
+            return
+        
+        else:
+            if len(parts) < 2:
+                await message.reply(
+                    "📝 Формат команды:\n\n"
+                    "1️⃣ Ответьте на сообщение:\n"
+                    "/gift 100\n\n"
+                    "2️⃣ Укажите получателя:\n"
+                    "/gift @username 100\n"
+                    "/gift 123456789 100"
+                )
+                return
+            
+            username_or_id = parts[0]
+            
+            try:
+                amount = float(parts[1].replace(',', '.'))
+            except (ValueError, IndexError):
+                await message.reply("❌ Неверная сумма. Пример: /gift @username 100")
+                return
+            
+            sender_id = message.from_user.id
+            
+            receiver_id = None
+            receiver_username = None
+            
+            if username_or_id.startswith('@'):
+                username = username_or_id[1:].lower()
+                data = load_db()
+                
+                found = False
+                for uid, user_data in data['menu_users'].items():
+                    if user_data.get('username', '').lower() == username:
+                        receiver_id = int(uid)
+                        receiver_username = user_data.get('username')
+                        found = True
+                        break
+                
+                if not found:
+                    await message.reply(f"❌ Пользователь {username_or_id} не найден в базе")
+                    return
+            
+            elif username_or_id.isdigit():
+                receiver_id = int(username_or_id)
+                data = load_db()
+                
+                if str(receiver_id) not in data['menu_users']:
+                    await message.reply(f"❌ Пользователь с ID {receiver_id} не найден")
+                    return
+                
+                receiver_username = data['menu_users'][str(receiver_id)].get('username', str(receiver_id))
+            
+            else:
+                await message.reply("❌ Используйте @username или ID пользователя")
+                return
+            
+            if receiver_id == sender_id:
+                await message.reply("❌ Нельзя дарить подарок самому себе")
+                return
+            
+            await process_gift(
+                message, 
+                sender_id, 
+                receiver_id, 
+                amount,
+                receiver_username=receiver_username
+            )
+            return
+        
+    except Exception as e:
+        logger.error(f"Ошибка отправки подарка: {e}", exc_info=True)
+        await message.reply("❌ Произошла ошибка. Попробуйте позже.")
+
+
+async def process_gift(message: Message, sender_id: int, receiver_id: int, amount: float, receiver_username: str = None):
+
+    
+    
+    if amount <= 0:
+        await message.reply("❌ Сумма должна быть больше 0")
+        return
+    
+    if amount < 1:
+        await message.reply("❌ Минимальная сумма подарка: 1 RUB")
+        return
+    
+    MAX_GIFT_AMOUNT = 10000
+    if amount > MAX_GIFT_AMOUNT:
+        await message.reply(f"❌ Максимальная сумма подарка: {MAX_GIFT_AMOUNT} RUB")
+        return
+    
+    if amount != round(amount, 2):
+        await message.reply("❌ Сумма должна быть с точностью до 2 знаков (например, 100.50)")
+        return
+    
+    try:
+        receiver_user = await bot.get_chat(receiver_id)
+        if receiver_user.type == "private" and getattr(receiver_user, 'is_bot', False):
+            await message.reply("❌ Нельзя дарить баланс боту")
+            return
+    except Exception as e:
+        logger.error(f"Ошибка проверки получателя: {e}")
+    
+    sender_data = get_or_create_user(sender_id, message.from_user.username or message.from_user.first_name)
+    
+    if sender_data['balance'] < amount:
+        await message.reply(
+            f"❌ Недостаточно средств.\n"
+            f"💰 Ваш баланс: {sender_data['balance']:.2f} RUB\n"
+            f"🎁 Сумма подарка: {amount:.2f} RUB"
+        )
+        return
+    
+    if receiver_username:
+        receiver_data = get_or_create_user(receiver_id, receiver_username)
+    else:
+        receiver_data = get_or_create_user(receiver_id)
+    
+    if not receiver_data:
+        await message.reply("❌ Ошибка: получатель не найден")
+        return
+    
+    
+    success_send = update_user_balance(sender_id, amount, "gift_sent")
+    if not success_send:
+        await message.reply("❌ Ошибка при списании средств. Попробуйте позже.")
+        return
+    
+    success_receive = update_user_balance(receiver_id, amount, "gift_received")
+    if not success_receive:
+        update_user_balance(sender_id, amount, "gift_received")  
+        await message.reply("❌ Ошибка при зачислении средств получателю. Операция отменена.")
+        return
+    
+    sender_data = get_or_create_user(sender_id)
+    receiver_data = get_or_create_user(receiver_id)
+    
+    sender_name = sender_data.get('username', f"user_{sender_id}")
+    receiver_name = receiver_data.get('username', f"user_{receiver_id}")
+    
+    logger.info(
+        f"[GIFT] @{sender_name} -> @{receiver_name} | "
+        f"{amount:.2f} RUB | "
+        f"Sender balance: {sender_data['balance']:.2f} | "
+        f"Receiver balance: {receiver_data['balance']:.2f}"
+    )
+    
+    
+    formatted_amount = f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+    formatted_sender_balance = f"{sender_data['balance']:,.2f}".replace(",", " ").replace(".", ",")
+    
+    await message.reply(
+        f"✅ Подарок отправлен!\n\n"
+        f"👤 Кому: @{receiver_name}\n"
+        f"💰 Сумма: {formatted_amount} RUB\n\n"
+        f"💳 Ваш баланс: {formatted_sender_balance} RUB"
+    )
+    
+    await send_gift_notification(
+        receiver_id=receiver_id,
+        sender_name=sender_name,
+        amount=amount,
+        new_balance=receiver_data['balance']
+    )
+    
+    LOG_CHAT_ID = None  
+    if LOG_CHAT_ID:
+        try:
+            await bot.send_message(
+                LOG_CHAT_ID,
+                f"🎁 ПОДАРОК\n"
+                f"От: @{sender_name} (ID: {sender_id})\n"
+                f"Кому: @{receiver_name} (ID: {receiver_id})\n"
+                f"Сумма: {amount:.2f} RUB"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки в лог-чат: {e}")
+
+
+async def send_gift_notification(receiver_id: int, sender_name: str, amount: float, new_balance: float):
+
+    
+    if amount >= 1000:
+        formatted_amount = f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+    else:
+        formatted_amount = f"{amount:.2f}".replace(".", ",")
+    
+    if new_balance >= 1000:
+        formatted_balance = f"{new_balance:,.2f}".replace(",", " ").replace(".", ",")
+    else:
+        formatted_balance = f"{new_balance:.2f}".replace(".", ",")
+    
+    message_text = (
+        f"<b>💸 Вам перевели {formatted_amount} RUB</b>\n\n"
+        f"<i>от @{sender_name}</i>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 <b>Ваш баланс: {formatted_balance} RUB</b>"
+    )
+    
+    try:
+        await bot.send_message(
+            receiver_id,
+            message_text,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки HTML-уведомления: {e}")
+        await bot.send_message(
+            receiver_id,
+            f"🎁 Вы получили подарок {amount:.2f} RUB от @{sender_name}!\n\n"
+            f"💰 Ваш баланс: {new_balance:.2f} RUB"
+        )
+
+def get_main_menu():
+    keyboard = [
+        [InlineKeyboardButton(text="Активные игры", callback_data="active_games")],
+        [InlineKeyboardButton(text="Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="Тех поддержка", url=SUPPORT_URL)]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_back_to_main():
+    keyboard = [[InlineKeyboardButton(text="Назад", callback_data="back_to_main")]]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_back_to_games():
+    keyboard = [[InlineKeyboardButton(text="Назад", callback_data="active_games")]]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_profile_menu():
+    keyboard = [
+        [InlineKeyboardButton(text="Пополнение", callback_data="deposit"), 
+         InlineKeyboardButton(text="Вывод", callback_data="withdraw")],
+        [InlineKeyboardButton(text="Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="Сделать подарок", callback_data="make_gift")],
+        [InlineKeyboardButton(text="Промокоды", callback_data="promocodes_menu")],
+        [InlineKeyboardButton(text="Реферальная система", callback_data="referral")],
+        [InlineKeyboardButton(text="Назад", callback_data="back_to_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_back_to_profile():
+    keyboard = [[InlineKeyboardButton(text="Назад", callback_data="profile")]]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_payment_back():
+    keyboard = [[InlineKeyboardButton(text="Назад", callback_data="payment_back")]]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message, command: CommandObject = None):
+    user_id = str(message.from_user.id)
+    username = message.from_user.username or message.from_user.first_name
+    
+    user_data = get_or_create_user(message.from_user.id, username)
+    
+    if command and command.args:
+        try:
+            referrer_id = decode_payload(command.args)
+            if referrer_id and referrer_id != user_id and not user_data.get('referrer'):
+                data = load_db()
+                
+                if user_id in data['menu_users']:
+                    data['menu_users'][user_id]['referrer'] = referrer_id
+                    
+                    referrer_id_str = str(referrer_id)
+                    if referrer_id_str in data['menu_users']:
+                        referrer_data = data['menu_users'][referrer_id_str]
+                        
+                        if 'referrals_list' not in referrer_data:
+                            referrer_data['referrals_list'] = []
+                        
+                        if user_id not in referrer_data['referrals_list']:
+                            referrer_data['referrals_list'].append(user_id)
+                            referrer_data['referrals'] = len(referrer_data['referrals_list'])
+                            
+                            try:
+                                await bot.send_message(
+                                    int(referrer_id),
+                                    f"✅ По вашей ссылке зарегистрировался новый пользователь!\n"
+                                    f"👤 @{username}\n"
+                                    f"👥 Теперь у вас {referrer_data['referrals']} рефералов\n"
+                                    f"💰 Вы будете получать 2% от всех депозитов этого пользователя!"
+                                )
+                            except Exception as e:
+                                logger.error(f"Ошибка отправки уведомления рефереру: {e}")
+                    
+                    save_db(data)
+        except Exception as e:
+            logger.error(f"Ошибка декодирования payload: {e}")
+    
+    short_caption = """✅ ДОБРО ПОЖАЛОВАТЬ!
+
+💰 КУРС: 1 USDT = 80 RUB
+📌 МИН. СТАВКА: 10 RUB
+
+👇 ВЫБЕРИТЕ РАЗДЕЛ"""
+
+    if int(user_id) == ADMIN_ID:
+        short_caption += "\n\n👑 АДМИН: /set_promo /promos /rb /pending /dump"
+    
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer_photo(
+            PHOTOS["start"],
+            caption=short_caption,
+            reply_markup=get_main_menu()
+        )
+        
+        commands_text = """🎮 ДОСТУПНЫЕ ИГРЫ:
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 CLASSIC (1 бросок):
+/cub [ставка] - КУБИКИ
+/dart [ставка] - ДАРТС
+/basket [ставка] - БАСКЕТБОЛ
+/bowl [ставка] - БОУЛИНГ
+/foot [ставка] - ФУТБОЛ
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 X (до N побед):
+/cub[2-5]x [ставка] - пример: /cub3x 20
+/dart[2-5]x [ставка] - пример: /dart3x 20
+/basket[2-5]x [ставка] - пример: /basket3x 20
+/bowl[2-5]x [ставка] - пример: /bowl3x 20
+/foot[2-5]x [ставка] - пример: /foot3x 20
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 TOTAL (N бросков):
+/cub[2-5]t [ставка] - пример: /cub5t 30
+/dart[2-5]t [ставка] - пример: /dart5t 30
+/basket[2-5]t [ставка] - пример: /basket5t 30
+/bowl[2-5]t [ставка] - пример: /bowl5t 30
+/foot[2-5]t [ставка] - пример: /foot5t 30
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 PLAYERS (N игроков):
+/cub[2-5]p [ставка] - пример: /cub4p 40
+/dart[2-5]p [ставка] - пример: /dart4p 40
+/basket[2-5]p [ставка] - пример: /basket4p 40
+/bowl[2-5]p [ставка] - пример: /bowl4p 40
+/foot[2-5]p [ставка] - пример: /foot4p 40
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 ДРУГИЕ ИГРЫ:
+/21cub [ставка] - 21 ОЧКО (PVP)
+
+━━━━━━━━━━━━━━━━━━━━━
+💰 УПРАВЛЕНИЕ БАЛАНСОМ:
+/bal - посмотреть баланс
+/gift [сумма] - подарить баланс
+/del - удалить последнюю игру
+/promo [КОД] - активировать промокод
+/ref - реферальная статистика
+
+━━━━━━━━━━━━━━━━━━━━━
+❓ ВОПРОСЫ: @kyzayshop"""
+
+        await message.answer(commands_text)
+        
+        await message.answer(
+            "⬇️ Меню:",
+            reply_markup=get_bottom_menu()
+        )
+    else:
+        group_text = """🎮 ДОСТУПНЫЕ ИГРЫ В ГРУППЕ:
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 CLASSIC (1 бросок):
+/cub [ставка] - КУБИКИ
+/dart [ставка] - ДАРТС
+/basket [ставка] - БАСКЕТБОЛ
+/bowl [ставка] - БОУЛИНГ
+/foot [ставка] - ФУТБОЛ
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 X (до N побед):
+/cub[2-5]x [ставка] - пример: /cub3x 20
+/dart[2-5]x [ставка] - пример: /dart3x 20
+/basket[2-5]x [ставка] - пример: /basket3x 20
+/bowl[2-5]x [ставка] - пример: /bowl3x 20
+/foot[2-5]x [ставка] - пример: /foot3x 20
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 TOTAL (N бросков):
+/cub[2-5]t [ставка] - пример: /cub5t 30
+/dart[2-5]t [ставка] - пример: /dart5t 30
+/basket[2-5]t [ставка] - пример: /basket5t 30
+/bowl[2-5]t [ставка] - пример: /bowl5t 30
+/foot[2-5]t [ставка] - пример: /foot5t 30
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 PLAYERS (N игроков):
+/cub[2-5]p [ставка] - пример: /cub4p 40
+/dart[2-5]p [ставка] - пример: /dart4p 40
+/basket[2-5]p [ставка] - пример: /basket4p 40
+/bowl[2-5]p [ставка] - пример: /bowl4p 40
+/foot[2-5]p [ставка] - пример: /foot4p 40
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 ДРУГИЕ ИГРЫ:
+/21cub [ставка] - 21 ОЧКО (PVP)
+
+━━━━━━━━━━━━━━━━━━━━━
+💰 УПРАВЛЕНИЕ БАЛАНСОМ:
+/bal - посмотреть баланс
+/gift [сумма] - подарить баланс
+/del - удалить последнюю игру
+
+━━━━━━━━━━━━━━━━━━━━━
+📌 МИН. СТАВКА: 10 RUB
+💰 КУРС: 1 USDT = 80 RUB
+━━━━━━━━━━━━━━━━━━━━━
+
+❓ ВОПРОСЫ: @kyzayshop"""
+        
+        await message.reply(group_text)
+
+@dp.message(F.text == "GAMES")
+async def games_reply_button(message: Message):
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="CHAT GAMES", url=GROUP_LINK)],
+        [InlineKeyboardButton(text="🎰 БАРАБАН", callback_data="game_slots")],
+        [InlineKeyboardButton(text="🤜🏻 К-Н-Б", callback_data="game_rps")],
+    ])
+    await message.answer("🎮 Выберите игру:", reply_markup=keyboard)
+
+@dp.message(F.text == "CASES")
+async def cases_reply_button(message: Message):
+    await message.answer("🎁 Кейсы временно недоступны")
+
+@dp.message(F.text == "INFO")
+async def info_reply_button(message: Message):
+    await cmd_start(message, None)
+
+@dp.message(F.text == "PROFILE")
+async def profile_reply_button(message: Message):
+
+    user_id = str(message.from_user.id)
+    user_data = get_or_create_user(message.from_user.id, message.from_user.username)
+    
+    profile_text = f"""
+📁 ЛИЧНЫЙ КАБИНЕТ
+
+🆔 ID: {user_id}
+👤 Username: @{user_data['username']}
+
+💰 БАЛАНС: {user_data['balance']:.2f} RUB
+📅 РЕГИСТРАЦИЯ: {user_data['registered']}
+
+👥 РЕФЕРАЛОВ: {user_data['referrals']}
+💸 ДОХОД ОТ РЕФЕРАЛОВ: {user_data.get('total_referral_income', 0):.2f} RUB
+    """
+    
+    await message.answer_photo(
+        photo=PHOTOS["profile"],
+        caption=profile_text,
+        reply_markup=get_profile_menu()
+    )
+
+@dp.message(F.text == "СЛУЖБА ПОДДЕРЖКИ")
+async def support_reply_button(message: Message):
+
+    await message.answer(f"🆘 Служба поддержки: {SUPPORT_URL}")
+
+@dp.message(Command("bal", "бал"))
+async def cmd_balance(message: Message):
+    user_id = str(message.from_user.id)
+    balance = get_user_balance(message.from_user.id)
+    await message.reply(f"💰 Баланс: {balance:.2f} RUB")
+
+@dp.message(Command("del"))
+async def cmd_delete_last_game(message: Message):
+    try:
+        user_id = str(message.from_user.id)
+        username = message.from_user.username or message.from_user.first_name
+        
+        data = load_db()
+        active_games = data.get('games', {})
+        user_games = []
+        
+        for game_id, game in active_games.items():
+            if game.get('creator_id') == message.from_user.id and game.get('status') == 'waiting':
+                user_games.append((game_id, game))
+        
+        if not user_games:
+            await message.answer("❌ У вас нет активных игр, ожидающих начала")
+            return
+        
+        user_games.sort(key=lambda x: int(x[0]), reverse=True)
+        last_game_id, last_game = user_games[0]
+        
+        bet = last_game['bet']
+        
+        logger.info(f"[DEL] Game #{last_game_id}: returning {bet} RUB to creator {message.from_user.id}")
+        
+        success = update_user_balance(message.from_user.id, bet, "game_win")
+        
+        if success:
+            logger.info(f"[DEL] Successfully returned {bet} RUB to creator {message.from_user.id}")
+        else:
+            logger.error(f"[DEL] FAILED to return {bet} RUB to creator {message.from_user.id}")
+        
+        data = load_db()
+        save_db(data)
+        
+        try:
+            if last_game.get('message_id'):
+                await bot.delete_message(
+                    chat_id=last_game['chat_id'],
+                    message_id=last_game['message_id']
+                )
+        except Exception as e:
+            logger.error(f"Ошибка удаления сообщения игры: {e}")
+        
+        if last_game_id in data['games']:
+            del data['games'][last_game_id]
+            save_db(data)
+            logger.info(f"[DEL] Game #{last_game_id} removed from DB")
+        
+        await message.answer(
+            f"✅ Игра #{last_game_id} удалена.\n"
+            f"💰 Ставка {bet} RUB возвращена на баланс."
+        )
+        
+        logger.info(f"Пользователь {username} удалил игру #{last_game_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка удаления игры: {e}", exc_info=True)
+        await message.answer("❌ Ошибка удаления игры")
+
+@dp.callback_query(F.data == "game_slots")
+async def game_slots_callback(callback: CallbackQuery, state: FSMContext):
+
+    await callback.answer()
+    await state.update_data(game_type="slots", user_choice=None, use_bonus=False)
+    
+    await callback.message.answer(
+        "🎰 БАРАБАН\n\n"
+        "🎯 Джекпот 777 - x4\n"
+        "🎯 Три одинаковых - x2\n\n"
+        "💰 Введите сумму ставки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_games")]
+        ])
+    )
+    await state.set_state(UserStates.waiting_bet_amount)
+
+@dp.callback_query(F.data == "game_rps")
+async def game_rps_callback(callback: CallbackQuery, state: FSMContext):
+
+    await callback.answer()
+    await state.update_data(game_type="rps", use_bonus=False)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Камень | 3x", callback_data="bet_rps_rock"),
+         InlineKeyboardButton(text="Ножницы | 3x", callback_data="bet_rps_scissors"),
+         InlineKeyboardButton(text="Бумага | 3x", callback_data="bet_rps_paper")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_games")]
+    ])
+    await callback.message.answer("🤜🏻 КМН\n\nВыберите:", reply_markup=keyboard)
+
+@dp.callback_query(F.data.startswith("bet_rps_"))
+async def process_rps_bet(callback: CallbackQuery, state: FSMContext):
+
+    await callback.answer()
+    user_choice = callback.data.split("_")[2]
+    await state.update_data(game_type="rps", user_choice=user_choice)
+    
+    await callback.message.answer(
+        f"🤜🏻 Ваша ставка: {user_choice}\n\n💰 Введите сумму:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="game_rps")]
+        ])
+    )
+    await state.set_state(UserStates.waiting_bet_amount)
+
+
+@dp.callback_query(F.data == "back_to_games")
+async def back_to_games(callback: CallbackQuery):
+
+    await callback.answer()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 БАРАБАН", callback_data="game_slots")],
+        [InlineKeyboardButton(text="🤜🏻 КАМЕНЬ-НОЖНИЦЫ-БУМАГА", callback_data="game_rps")],
+    ])
+    await callback.message.edit_text("🎮 Выберите игру:", reply_markup=keyboard)
+
+@dp.message(UserStates.waiting_bet_amount)
+async def process_bet_amount(message: Message, state: FSMContext):
+
+    try:
+        bet_amount = float(message.text.replace(',', '.'))
+        
+        if bet_amount < 10:
+            await message.answer("❌ Минимальная ставка: 10 RUB")
+            return
+        
+        user_data = await state.get_data()
+        game_type = user_data.get('game_type')
+        user_choice = user_data.get('user_choice')
+        
+        balance = get_user_balance(message.from_user.id)
+        
+        if balance < bet_amount:
+            await message.answer(f"❌ Недостаточно средств. Ваш баланс: {balance:.2f} RUB")
+            await state.clear()
+            return
+        
+        success = update_user_balance(message.from_user.id, bet_amount, "game_bet")
+        if not success:
+            await message.answer("❌ Ошибка при списании ставки")
+            await state.clear()
+            return
+        
+        if game_type == "slots":
+            await play_slots_game(message, bet_amount)
+        elif game_type == "rps":
+            await play_rps_game(message, bet_amount, user_choice)
+        
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("❌ Введите число! Пример: 100 или 100.50")
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    help_text = """🎮 ДОСТУПНЫЕ КОМАНДЫ:
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 CLASSIC (1 бросок):
+━━━━━━━━━━━━━━━━━━━━━
+/cub [ставка] - КУБИКИ
+/dart [ставка] - ДАРТС
+/basket [ставка] - БАСКЕТБОЛ
+/bowl [ставка] - БОУЛИНГ
+/foot [ставка] - ФУТБОЛ
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 X (до N побед):
+━━━━━━━━━━━━━━━━━━━━━
+/cub[2-5]x [ставка] - кубики до X побед
+/dart[2-5]x [ставка] - дартс до X побед
+/basket[2-5]x [ставка] - баскетбол до X побед
+/bowl[2-5]x [ставка] - боулинг до X побед
+/foot[2-5]x [ставка] - футбол до X побед
+
+Пример: /cub3x 20
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 TOTAL (N бросков):
+━━━━━━━━━━━━━━━━━━━━━
+/cub[2-5]t [ставка] - N бросков кубиков
+/dart[2-5]t [ставка] - N бросков дартс
+/basket[2-5]t [ставка] - N бросков баскетбол
+/bowl[2-5]t [ставка] - N бросков боулинг
+/foot[2-5]t [ставка] - N бросков футбол
+
+Пример: /basket5t 30
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 PLAYERS (N игроков):
+━━━━━━━━━━━━━━━━━━━━━
+/cub[2-5]p [ставка] - на N игроков
+/dart[2-5]p [ставка] - на N игроков
+/basket[2-5]p [ставка] - на N игроков
+/bowl[2-5]p [ставка] - на N игроков
+/foot[2-5]p [ставка] - на N игроков
+
+Пример: /bowl4p 40
+
+━━━━━━━━━━━━━━━━━━━━━
+🎲 ДРУГИЕ ИГРЫ:
+━━━━━━━━━━━━━━━━━━━━━
+/21cub [ставка] - 21 ОЧКО (PVP)
+
+━━━━━━━━━━━━━━━━━━━━━
+💰 УПРАВЛЕНИЕ БАЛАНСОМ:
+━━━━━━━━━━━━━━━━━━━━━
+/bal - показать баланс
+/gift [сумма] - подарить баланс
+/del - удалить последнюю игру
+/promo [КОД] - активировать промокод
+/ref - реферальная статистика
+
+━━━━━━━━━━━━━━━━━━━━━
+ℹ️ ОСТАЛЬНОЕ:
+━━━━━━━━━━━━━━━━━━━━━
+/start - главное меню
+/help - эта справка
+
+━━━━━━━━━━━━━━━━━━━━━
+📌 МИНИМАЛЬНАЯ СТАВКА: 10 RUB
+💰 КУРС: 1 USDT = 80 RUB
+━━━━━━━━━━━━━━━━━━━━━
+
+❓ ПОДДЕРЖКА: @kyzayshop"""
+    
+    await message.reply(help_text)
+
+
+async def get_pay_link(amount: float, payload: str = "", asset: str = "USDT"):
+    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_API_TOKEN}
+    
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+    
+    data = {
+        "asset": asset,
+        "amount": str(amount),
+        "expires_in": 3600,
+        "paid_btn_name": "openBot",
+        "paid_btn_url": f"https://t.me/{bot_username}",
+        "payload": payload,
+        "allow_comments": False,
+        "allow_anonymous": True
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                'https://pay.crypt.bot/api/createInvoice',
+                headers=headers,
+                json=data,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if result.get('ok'):
+                        invoice = result['result']
+                        return invoice['pay_url'], str(invoice['invoice_id'])
+                
+                logger.error(f"Ошибка создания счета: статус {response.status}, ответ: {await response.text()}")
+                return None, None
+                
+    except Exception as e:
+        logger.error(f"Ошибка создания счета: {e}")
+        return None, None
+
+@dp.message(F.photo)
+async def get_photo_file_id(message: Message):
+
+    file_id = message.photo[-1].file_id  
+    logger.info(f"📸 PHOTO file_id от @{message.from_user.username or message.from_user.id}: {file_id}")
+
+async def create_check(amount_usdt: float, user_id: int, pin_to_user_id: bool = True):
+    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_API_TOKEN}
+    
+    data = {
+        "asset": "USDT",
+        "amount": str(amount_usdt),
+        "pin_to_user_id": user_id if pin_to_user_id else None
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                'https://pay.crypt.bot/api/createCheck',
+                headers=headers,
+                json=data,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if result.get('ok'):
+                        check = result['result']
+                        return check['bot_check_url'], str(check['check_id'])
+                
+                logger.error(f"Ошибка создания чека: статус {response.status}, ответ: {await response.text()}")
+                return None, None
+                
+    except Exception as e:
+        logger.error(f"Ошибка создания чека: {e}")
+        return None, None
+
+async def check_invoice_status(invoice_id: str):
+    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_API_TOKEN}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f'https://pay.crypt.bot/api/getInvoices?invoice_ids={invoice_id}',
+                headers=headers,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if result.get('ok') and result['result']['items']:
+                        invoice = result['result']['items'][0]
+                        return invoice['status']
+                
+                return None
+                
+    except Exception as e:
+        logger.error(f"Ошибка проверки счета: {e}")
+        return None
+
+def create_deposit(user_id, amount, invoice_url, invoice_id):
+    data = load_db()
+    
+    deposit_id = len(data['deposits']) + 1
+    deposit = {
+        'id': deposit_id,
+        'user_id': user_id,
+        'amount': amount,
+        'status': 'pending',
+        'invoice_url': invoice_url,
+        'invoice_id': invoice_id,
+        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    data['deposits'].append(deposit)
+    save_db(data)
+    return deposit_id
+
+def complete_deposit(invoice_id):
+    data = load_db()
+    
+    for deposit in data['deposits']:
+        if deposit['invoice_id'] == invoice_id and deposit['status'] == 'pending':
+            deposit['status'] = 'completed'
+            user_id = deposit['user_id']
+            amount = deposit['amount']
+            
+            update_user_balance(user_id, amount, "deposit_completed", 
+                invoice_id=invoice_id, 
+                completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
+            
+            user_data = data['menu_users'].get(str(user_id), {})
+            username = user_data.get('username', str(user_id))
+            
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(send_deposit_notification(username, amount))
+            else:
+                loop.run_until_complete(send_deposit_notification(username, amount))
+            
+            if user_data.get('referrer'):
+                referrer_id = user_data['referrer']
+                bonus = amount * 0.02
+                update_user_balance(referrer_id, bonus, "referral_bonus",
+                    from_user=user_id, 
+                    deposit_amount=amount,
+                    completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                )
+                
+                data = load_db()
+                if str(referrer_id) in data['menu_users']:
+                    data['menu_users'][str(referrer_id)]['total_referral_income'] = \
+                        data['menu_users'][str(referrer_id)].get('total_referral_income', 0) + bonus
+                    save_db(data)
+            
+            save_db(data)
+            return user_id, amount, True
+    
+    return None, None, False
+
+def create_withdrawal(user_id, amount):
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    if user_id_str not in data['menu_users']:
+        return None
+    
+    user_data = data['menu_users'][user_id_str]
+    
+    if user_data['balance'] < amount:
+        return None
+    
+    user_data['balance'] -= amount
+    user_data['total_withdrawn'] += amount
+    
+    withdrawal_id = len(data['withdrawals']) + 1
+    withdrawal = {
+        'id': withdrawal_id,
+        'user_id': user_id,
+        'amount': amount,
+        'status': 'pending',
+        'check_url': None,
+        'check_id': None,
+        'admin_approved': False,
+        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    data['transactions'].append({
+        'user_id': user_id_str,
+        'type': 'withdraw_pending',
+        'amount': amount,
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    
+    data['withdrawals'].append(withdrawal)
+    save_db(data)
+    return withdrawal_id
+
+def update_withdrawal_check(withdrawal_id, check_url, check_id):
+    data = load_db()
+    
+    for withdrawal in data['withdrawals']:
+        if withdrawal['id'] == withdrawal_id:
+            withdrawal['check_url'] = check_url
+            withdrawal['check_id'] = check_id
+            withdrawal['status'] = 'completed'
+
+            for transaction in reversed(data['transactions']):
+                if (transaction.get('user_id') == str(withdrawal['user_id']) and 
+                    transaction.get('type') == 'withdraw_pending' and 
+                    transaction.get('amount') == withdrawal['amount']):
+                    transaction['type'] = 'withdraw'
+                    transaction['check_id'] = check_id
+                    break
+            
+            save_db(data)
+            return True
+    
+    return False
+
+def reject_withdrawal_func(withdrawal_id):
+    data = load_db()
+    
+    for withdrawal in data['withdrawals']:
+        if withdrawal['id'] == withdrawal_id:
+            withdrawal['status'] = 'rejected'
+            user_id = withdrawal['user_id']
+            amount = withdrawal['amount']
+            
+            user_id_str = str(user_id)
+            if user_id_str in data['menu_users']:
+                data['menu_users'][user_id_str]['balance'] += amount
+                
+                for transaction in reversed(data['transactions']):
+                    if (transaction.get('user_id') == user_id_str and 
+                        transaction.get('type') == 'withdraw_pending' and 
+                        transaction.get('amount') == amount):
+                        transaction['type'] = 'withdraw_rejected'
+                        break
+            
+            save_db(data)
+            return True
+    
+    return False
+
+def get_withdrawal(withdrawal_id):
+    data = load_db()
+    
+    for withdrawal in data['withdrawals']:
+        if withdrawal['id'] == withdrawal_id:
+            return withdrawal
+    
+    return None
+
+def get_pending_withdrawals():
+    data = load_db()
+    
+    pending = []
+    for withdrawal in data['withdrawals']:
+        if withdrawal['status'] == 'pending':
+            pending.append(withdrawal)
+    
+    return pending
+
+async def send_gift_notification(receiver_id: int, sender_name: str, amount: float, new_balance: float):
+
+    
+    if amount >= 1000:
+        formatted_amount = f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+    else:
+        formatted_amount = f"{amount:.2f}".replace(".", ",")
+    
+    if new_balance >= 1000:
+        formatted_balance = f"{new_balance:,.2f}".replace(",", " ").replace(".", ",")
+    else:
+        formatted_balance = f"{new_balance:.2f}".replace(".", ",")
+    
+    message_text = (
+        f"<b>💸 Вам перевели {formatted_amount} RUB</b>\n\n"
+        f"<i>от @{sender_name}</i>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 <b>Ваш баланс: {formatted_balance} RUB</b>"
+    )
+    
+    try:
+        await bot.send_message(
+            receiver_id,
+            message_text,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления о подарке: {e}")
+        await bot.send_message(
+            receiver_id,
+            f"🎁 Вы получили подарок {amount:.2f} RUB от @{sender_name}!\n\n"
+            f"💰 Ваш баланс: {new_balance:.2f} RUB"
+        )
+
+@dp.message(DepositStates.waiting_amount)
+async def process_deposit_amount(message: types.Message, state: FSMContext):
+    try:
+        logger.info(f"Начало обработки депозита для пользователя {message.from_user.id}")
+        
+        amount_rub = float(message.text.replace(',', '.'))
+        
+        if amount_rub < 10:
+            await message.answer("Минимальная сумма пополнения: 10 RUB")
+            return
+        
+        user_id = message.from_user.id
+        
+        amount_usdt = round(amount_rub / USDT_RATE, 6)
+        
+        logger.info(f"Создание счета на {amount_usdt} USDT")
+        
+        invoice_url, invoice_id = await get_pay_link(amount_usdt, f"deposit_{user_id}", "USDT")
+        
+        if not invoice_url:
+            logger.error("Не удалось создать счет")
+            await message.answer("Ошибка при создании счета. Попробуйте позже.")
+            await state.clear()
+            return
+        
+        logger.info(f"Счет создан: {invoice_id}")
+        
+        deposit_id = create_deposit(user_id, amount_rub, invoice_url, invoice_id)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Оплатить", url=invoice_url)],
+            [InlineKeyboardButton(text="Проверить оплату", callback_data=f"check_deposit_{invoice_id}")]
+        ])
+        
+        await message.answer(
+            f"Счет на {amount_rub:.2f} RUB ({amount_usdt:.6f} USDT) создан!\n\n"
+            f"Ссылка для оплаты: {invoice_url}\n\n"
+            f"После оплаты нажмите 'Проверить оплату'",
+            reply_markup=keyboard
+        )
+        
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("Введите число! Например: 100 или 100.50")
+    except Exception as e:
+        logger.error(f"Ошибка обработки депозита: {e}")
+        await message.answer("Произошла ошибка при обработке запроса")
+
+@dp.message(WithdrawStates.waiting_amount)
+async def process_withdraw_amount(message: types.Message, state: FSMContext):
+    try:
+        amount_rub = float(message.text.replace(',', '.'))
+        user_data = get_or_create_user(message.from_user.id)
+        
+        if amount_rub <= 0:
+            await message.answer("Введите положительную сумму!")
+            return
+        
+        if amount_rub > user_data['balance']:
+            await message.answer(f"Максимальная сумма для вывода: {user_data['balance']:.2f} RUB")
+            return
+        
+        if amount_rub < MIN_WITHDRAWAL:
+            await message.answer(f"Минимальная сумма вывода: {MIN_WITHDRAWAL} RUB")
+            return
+        
+        user_id = message.from_user.id
+        username = message.from_user.username or 'без username'
+        
+        amount_usdt = round(amount_rub / USDT_RATE, 6)
+        
+        if amount_rub < THRESHOLD:
+            withdrawal_id = create_withdrawal(user_id, amount_rub)
+            
+            if withdrawal_id is None:
+                await message.answer("Недостаточно средств на балансе!")
+                return
+            
+            check_url, check_id = await create_check(amount_usdt, user_id, pin_to_user_id=True)
+            
+            if not check_url:
+                reject_withdrawal_func(withdrawal_id)
+                await message.answer("Ошибка при создании чека для вывода. Попробуйте позже.")
+                return
+            
+            update_withdrawal_check(withdrawal_id, check_url, check_id)
+            
+            await send_withdrawal_notification(username, amount_rub, withdrawal_id)
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Получить чек", url=check_url)]
+            ])
+            
+            user_data = get_or_create_user(user_id)
+            
+            await message.answer(
+                f"Вывод {amount_rub:.2f} RUB ({amount_usdt:.3f} USDT) готов!\n\n"
+                f"🔗 Ссылка для получения: {check_url}\n\n"
+                f"Чек привязан к вашему ID и может быть активирован только вами.\n"
+                f"💰 Ваш баланс: {user_data['balance']:.2f} RUB",
+                reply_markup=keyboard
+            )
+        else:
+            withdrawal_id = create_withdrawal(user_id, amount_rub)
+            
+            if withdrawal_id is None:
+                await message.answer("Недостаточно средств на балансе!")
+                return
+            
+            await send_withdrawal_notification(username, amount_rub, withdrawal_id)
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_withdraw_{withdrawal_id}"),
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_withdraw_{withdrawal_id}")
+                ]
+            ])
+            
+            admin_text = f"""
+🚨 ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ ВЫВОДА!
+
+👤 Пользователь: @{username}
+🆔 ID: {user_id}
+💰 Сумма: {amount_rub:.2f} RUB ({amount_usdt:.6f} USDT)
+📋 ID заявки: {withdrawal_id}
+            """
+            
+            try:
+                await bot.send_message(ADMIN_ID, admin_text, reply_markup=keyboard)
+                await message.answer(f"✅ Заявка на вывод {amount_rub:.2f} RUB отправлена на проверку админу.\n💰 Средства временно заморожены.")
+            except Exception as e:
+                logger.error(f"Ошибка уведомления админа: {e}")
+                await message.answer("❌ Ошибка отправки заявки. Попробуйте позже.")
+                reject_withdrawal_func(withdrawal_id)
+        
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("Введите число! Например: 100 или 100.50")
+    except Exception as e:
+        logger.error(f"Ошибка обработки вывода: {e}")
+        await message.answer("Произошла ошибка при обработке запроса")
+
+@dp.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: types.CallbackQuery):
+    cap = "Добро пожаловать в бота!\n\nВыберите раздел:"
+    if int(callback.from_user.id) == ADMIN_ID:
+        cap += "\n\nАдмин команды:\n/set_promo - Создание промокода\n/promos - Просмотр активных промокодов\n/rb - обнулить баланс\n/pending - Просмотр ожидающих выводов\n/dump - Выгрузка базы данных"
+    
+    try:
+        await callback.message.edit_caption(
+            caption=cap,
+            reply_markup=get_main_menu()
+        )
+    except:
+        await callback.message.answer(
+            cap,
+            reply_markup=get_main_menu()
+        )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("approve_withdraw_"))
+async def approve_withdrawal(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Вы не админ!", show_alert=True)
+        return
+    
+    try:
+        withdrawal_id = int(callback.data.replace("approve_withdraw_", ""))
+        withdrawal = get_withdrawal(withdrawal_id)
+        
+        if not withdrawal:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+        
+        amount_rub = withdrawal['amount']
+        user_id = withdrawal['user_id']
+        
+        data = load_db()
+        user_data = data['menu_users'].get(str(user_id), {})
+        username = user_data.get('username', str(user_id))
+        
+        amount_usdt = round(amount_rub / USDT_RATE, 6)
+        
+        check_url, check_id = await create_check(amount_usdt, user_id, pin_to_user_id=True)
+        
+        if not check_url:
+            await callback.message.edit_text("Ошибка при создании чека")
+            return
+        
+        update_withdrawal_check(withdrawal_id, check_url, check_id)
+        
+        await send_withdrawal_approved_notification(username, amount_rub, withdrawal_id)
+        
+        await callback.message.edit_text(
+            f"✅ ВЫВОД ОДОБРЕН!\n\n"
+            f"👤 ID: {user_id}\n"
+            f"💰 {amount_rub:.2f} RUB ({amount_usdt:.6f} USDT)\n"
+            f"🔗 {check_url}"
+        )
+        
+        try:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Получить чек", url=check_url)]
+            ])
+            
+            await bot.send_message(
+                user_id, 
+                f"✅ Ваш вывод {amount_rub:.2f} RUB ({amount_usdt:.6f} USDT) одобрен!\n\n"
+                f"🔗 Ссылка для получения: {check_url}\n\n"
+                f"ℹ️ Чек привязан к вашему ID и может быть активирован только вами.\n"
+                f"💰 Ваш баланс: {user_data['balance']:.2f} RUB",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.error(f"Ошибка уведомления пользователя: {e}")
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка одобрения вывода: {e}")
+        await callback.answer("Ошибка обработки", show_alert=True)
+
+@dp.callback_query(F.data == "payment_back")
+async def payment_back(callback: types.CallbackQuery):
+    await show_profile(callback)
+
+@dp.callback_query(F.data == "active_games")
+async def show_active_games(callback: types.CallbackQuery):
+    data = load_db()
+    active_games = []
+    
+    for game_id, game in data['games'].items():
+        if game['status'] == 'waiting' and len(game['players']) < game['max_players']:
+            active_games.append(game)
+    
+    if not active_games:
+        try:
+            await callback.message.edit_caption(
+                caption="🎮 Активные игры\n\nНет активных игр, ожидающих игроков.\n\nСоздайте игру в группе командой:\n/cub <ставка> - кубики\n/dart <ставка> - дартс",
+                reply_markup=get_back_to_main()
+            )
+        except:
+            await callback.message.answer(
+                "🎮 Активные игры\n\nНет активных игр, ожидающих игроков.\n\nСоздайте игру в группе командой:\n/cub <ставка> - кубики\n/dart <ставка> - дартс",
+                reply_markup=get_back_to_main()
+            )
+        await callback.answer()
+        return
+    
+    game_text = "🎮 Активные игры\n\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    
+    for game in active_games[:30]:
+        game_type = game['emoji']
+        bet = game['bet']
+        players = f"{len(game['players'])}/{game['max_players']}"
+        button_text = f"{game_type} | {bet:.0f} RUB | {players}"
+        
+        if game.get('message_link'):
+            keyboard.button(text=button_text, url=game['message_link'])
+        else:
+            try:
+                chat_id = game['chat_id']
+                message_id = game['message_id']
+                
+                if chat_id < 0:
+                    chat_id_str = str(chat_id).replace('-100', '')
+                    message_link = f"https://t.me/c/{chat_id_str}/{message_id}"
+                    game['message_link'] = message_link
+                    data['games'][game['game_id']]['message_link'] = message_link
+                    save_db(data)
+                    keyboard.button(text=button_text, url=message_link)
+                else:
+                    message_link = f"https://t.me/{(await bot.get_me()).username}?start=game_{game['game_id']}"
+                    keyboard.button(text=button_text, url=message_link)
+            except Exception as e:
+                logger.error(f"Ошибка создания ссылки для игры {game['game_id']}: {e}")
+                continue
+    
+    keyboard.button(text="Создать игру", url=GROUP_LINK)
+    keyboard.adjust(1)
+    
+    try:
+        await callback.message.edit_caption(
+            caption=game_text,
+            reply_markup=keyboard.as_markup()
+        )
+    except:
+        await callback.message.answer(
+            game_text,
+            reply_markup=keyboard.as_markup()
+        )
+    await callback.answer()
+
+@dp.callback_query(F.data == "profile")
+async def show_profile(callback: types.CallbackQuery):
+    user_id = str(callback.from_user.id)
+    user_data = get_or_create_user(callback.from_user.id, callback.from_user.username)
+    
+    profile_text = f"""
+Личный кабинет:
+
+ID: {user_id}
+Username: @{user_data['username']}
+
+💰 Баланс: {user_data['balance']:.2f} RUB
+📅 Дата регистрации: {user_data['registered']}
+
+👥 Рефералов: {user_data['referrals']}
+💸 Доход от рефералов: {user_data.get('total_referral_income', 0):.2f} RUB
+    """
+    
+    try:
+        await callback.message.edit_caption(
+            caption=profile_text,
+            reply_markup=get_profile_menu()
+        )
+    except:
+        await callback.message.answer(
+            profile_text,
+            reply_markup=get_profile_menu()
+        )
+    await callback.answer()
+
+@dp.callback_query(F.data == "deposit")
+async def start_deposit(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_media(
+        types.InputMediaPhoto(
+            media=PHOTOS["deposit"],
+            caption="Введите сумму для пополнения (в RUB):\n\nМинимальная сумма: 10 RUB\nКурс: 1 USDT = 80 RUB"
+        ),
+        reply_markup=get_payment_back()
+    )
+    await state.set_state(DepositStates.waiting_amount)
+    await callback.answer()
+
+@dp.callback_query(F.data == "withdraw")
+async def start_withdraw(callback: types.CallbackQuery, state: FSMContext):
+    user_data = get_or_create_user(callback.from_user.id)
+    
+    if user_data['balance'] <= 0:
+        await callback.message.edit_media(
+            types.InputMediaPhoto(
+                media=PHOTOS["withdraw"],
+                caption="На вашем балансе недостаточно средств для вывода!"
+            ),
+            reply_markup=get_payment_back()
+        )
+        return
+    
+    await callback.message.edit_media(
+        types.InputMediaPhoto(
+            media=PHOTOS["withdraw"],
+            caption=f"💰 Ваш баланс: {user_data['balance']:.2f} RUB\n\n"
+                   f"📌 Минимальная сумма вывода: {MIN_WITHDRAWAL} RUB\n"
+                   f"💱 Курс: 1 USDT = 80 RUB\n"
+                   f"✏️ Введите сумму для вывода (в RUB):"
+        ),
+        reply_markup=get_payment_back()
+    )
+    await state.set_state(WithdrawStates.waiting_amount)
+    await callback.answer()
+
+@dp.callback_query(F.data == "stats")
+async def show_stats(callback: types.CallbackQuery):
+    user_data = get_or_create_user(callback.from_user.id)
+    
+    stats_text = f"""
+📊 Статистика:
+
+💰 Всего пополнено: {user_data['total_deposited']:.2f} RUB
+💸 Всего выведено: {user_data['total_withdrawn']:.2f} RUB
+🛒 Всего потрачено: {user_data['total_spent']:.2f} RUB
+
+👥 Доход от рефералов: {user_data.get('total_referral_income', 0):.2f} RUB
+🎟 Использовано промокодов: {len(user_data['used_promocodes'])}
+📈 Приглашено рефералов: {user_data['referrals']}
+    """
+    
+    await callback.message.edit_media(
+        types.InputMediaPhoto(
+            media=PHOTOS["profile"],
+            caption=stats_text
+        ),
+        reply_markup=get_back_to_profile()
+    )
+
+@dp.callback_query(F.data == "make_gift")
+async def make_gift_info(callback: types.CallbackQuery):
+    await callback.message.edit_media(
+        types.InputMediaPhoto(
+            media=PHOTOS["profile"],
+            caption="🎁 Сделать подарок\n\n"
+                   "Для отправки подарка другому пользователю:\n"
+                   "/gift <сумма> (в ответ на сообщение в группе)\n"
+                   "/gift @username <сумма>\n"
+                   "/gift ID <сумма>\n\n"
+                   "📊 Лимиты:\n"
+                   "Максимальная сумма подарка: 10000 RUB\n"
+                   "Минимальная: 1 RUB"
+        ),
+        reply_markup=get_back_to_profile()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "promocodes_menu")
+async def show_promocodes_menu(callback: types.CallbackQuery):
+    user_data = get_or_create_user(callback.from_user.id)
+    
+    promocodes_text = f"""
+🎟 Промокоды
+
+📋 Использованные промокоды: {', '.join(user_data['used_promocodes']) if user_data['used_promocodes'] else 'нет'}
+
+Для активации промокода используйте команду:
+/promo КОД
+
+Пример: /promo BONUS100
+
+ℹ️ Промокоды начисляют баланс на ваш счет (RUB).
+ℹ️ Каждый промокод можно активировать только 1 раз на аккаунт.
+    """
+    
+    await callback.message.edit_media(
+        types.InputMediaPhoto(
+            media=PHOTOS["profile"],
+            caption=promocodes_text
+        ),
+        reply_markup=get_back_to_profile()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "referral")
+async def show_referral(callback: types.CallbackQuery):
+    user_id = str(callback.from_user.id)
+    user_data = get_or_create_user(callback.from_user.id)
+    
+    try:
+        ref_link = await create_start_link(bot, user_id, encode=True)
+    except Exception as e:
+        logger.error(f"Ошибка создания реф. ссылки: {e}")
+        ref_link = f"https://t.me/{(await bot.get_me()).username}?start={user_id}"
+    
+    referral_text = f"""
+👥 Реферальная система
+
+🔗 Ваша реферальная ссылка:
+{ref_link}
+
+📊 Ваших рефералов: {user_data['referrals']}
+💰 Доход от рефералов: {user_data.get('total_referral_income', 0):.2f} RUB
+
+🎯 За каждого приглашенного друга вы получаете 2% от его депозитов!
+💸 Приглашайте друзей по вашей ссылке и получайте пассивный доход.
+
+📝 Как это работает:
+1. Друг регистрируется по вашей ссылке
+2. Когда он пополняет баланс, вы получаете 2% от суммы
+3. Бонус начисляется автоматически
+    """
+    
+    await callback.message.edit_media(
+        types.InputMediaPhoto(
+            media=PHOTOS["profile"],
+            caption=referral_text
+        ),
+        reply_markup=get_back_to_profile()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("check_deposit_"))
+async def check_deposit(callback: types.CallbackQuery):
+    try:
+        invoice_id = callback.data.replace("check_deposit_", "")
+        
+        status = await check_invoice_status(invoice_id)
+        
+        if status == 'paid':
+            user_id, amount_rub, success = complete_deposit(invoice_id)
+            
+            if success and user_id:
+                user_data = get_or_create_user(user_id)
+                
+                await callback.message.edit_text(
+                    f"✅ Оплата подтверждена!\n\n"
+                    f"На ваш баланс зачислено {amount_rub:.2f} RUB\n"
+                    f"Текущий баланс: {user_data['balance']:.2f} RUB"
+                )
+                
+                if user_data.get('referrer'):
+                    referrer_bonus = amount_rub * 0.02
+                    try:
+                        await bot.send_message(
+                            user_data['referrer'],
+                            f"💰 Ваш реферал @{user_data['username']} пополнил баланс на {amount_rub:.2f} RUB\n"
+                            f"💸 Вам начислен бонус: {referrer_bonus:.2f} RUB (2%)\n"
+                            f"📊 Ваш баланс: {get_or_create_user(user_data['referrer'])['balance']:.2f} RUB"
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка уведомления рефереру: {e}")
+            else:
+                await callback.message.edit_text("⚠️ Депозит не найден или ошибка обработки")
+        
+        elif status == 'expired':
+            await callback.message.edit_text("⏰ Счет просрочен. Создайте новый счет.")
+        elif status == 'active':
+            await callback.answer("⌛ Счет еще не оплачен", show_alert=True)
+        else:
+            await callback.answer("❌ Не удалось проверить статус счета", show_alert=True)
+    
+    except Exception as e:
+        logger.error(f"Ошибка проверки депозита: {e}")
+        await callback.answer("❌ Ошибка проверки", show_alert=True)
+
+@dp.callback_query(F.data.startswith("approve_withdraw_"))
+async def approve_withdrawal(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Вы не админ!", show_alert=True)
+        return
+    
+    try:
+        withdrawal_id = int(callback.data.replace("approve_withdraw_", ""))
+        withdrawal = get_withdrawal(withdrawal_id)
+        
+        if not withdrawal:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+        
+        amount_rub = withdrawal['amount']
+        user_id = withdrawal['user_id']
+        
+        amount_usdt = round(amount_rub / USDT_RATE, 6)
+        
+        check_url, check_id = await create_check(amount_usdt, user_id, pin_to_user_id=True)
+        
+        if not check_url:
+            await callback.message.edit_text("Ошибка при создании чека")
+            return
+        
+        update_withdrawal_check(withdrawal_id, check_url, check_id)
+        
+        await callback.message.edit_text(
+            f"✅ ВЫВОД ОДОБРЕН!\n\n"
+            f"👤 ID: {user_id}\n"
+            f"💰 {amount_rub:.2f} RUB ({amount_usdt:.6f} USDT)\n"
+            f"🔗 {check_url}"
+        )
+        
+        try:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Получить чек", url=check_url)]
+            ])
+            
+            user_data = get_or_create_user(user_id)
+            await bot.send_message(
+                user_id, 
+                f"✅ Ваш вывод {amount_rub:.2f} RUB ({amount_usdt:.6f} USDT) одобрен!\n\n"
+                f"🔗 Ссылка для получения: {check_url}\n\n"
+                f"ℹ️ Чек привязан к вашему ID и может быть активирован только вами.\n"
+                f"💰 Ваш баланс: {user_data['balance']:.2f} RUB",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.error(f"Ошибка уведомления пользователя: {e}")
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка одобрения вывода: {e}")
+        await callback.answer("Ошибка обработки", show_alert=True)
+
+@dp.callback_query(F.data.startswith("reject_withdraw_"))
+async def reject_withdrawal(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Вы не админ!", show_alert=True)
+        return
+    
+    try:
+        withdrawal_id = int(callback.data.replace("reject_withdraw_", ""))
+        
+        success = reject_withdrawal_func(withdrawal_id)
+        
+        if success:
+            withdrawal = get_withdrawal(withdrawal_id)
+            user_id = withdrawal['user_id']
+            amount = withdrawal['amount']
+            
+            await callback.message.edit_text(f"❌ Вывод {amount:.2f} RUB отклонен")
+            
+            try:
+                user_data = get_or_create_user(user_id)
+                await bot.send_message(
+                    user_id, 
+                    f"❌ Ваш вывод {amount:.2f} RUB отклонен.\n"
+                    f"💰 Средства возвращены на баланс.\n\n"
+                    f"💳 Ваш баланс: {user_data['balance']:.2f} RUB"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка уведомления пользователя: {e}")
+        else:
+            await callback.message.edit_text("Заявка не найдена")
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка отклонения вывода: {e}")
+        await callback.answer("Ошибка обработки", show_alert=True)
+
+def not_forwarded(message: Message) -> bool:
+    return message.forward_date is None
+
+def create_game(emoji: str, command: str, auto_dice: bool = False) -> Callable:
+    
+    async def game_handler(message: Message):
+        if not not_forwarded(message):
+            return
+        
+        try:
+            parts = message.text.split()
+            cmd_with_params = parts[0][1:]
+
+            num_param = None
+            mode_param = None
+            
+            match = re.search(r'(\d+)([xpt])$', cmd_with_params)
+            if match:
+                num_param = int(match.group(1))
+                mode_param = match.group(2)
+                cmd_base = cmd_with_params[:match.start()]
+            else:
+                cmd_base = cmd_with_params
+            
+            if not cmd_base.startswith(command):
+                return
+            
+            bet = 10
+            if len(parts) > 1:
+                try:
+                    bet = float(parts[1])
+                except ValueError:
+                    await message.reply(f"Неверная ставка. Используйте: /{cmd_with_params} <ставка>")
+                    return
+            
+            if bet < 10:
+                await message.reply(f"Ставка не может быть меньше 10 RUB")
+                return
+
+            max_players = 2
+            game_mode = 'classic'
+            dice_per_player = 1
+            total_rounds = 1
+            
+            if mode_param == 'x':
+                max_wins = num_param if num_param else 1
+                game_mode = 'wins'
+                dice_per_player = 1
+                total_rounds = max_wins * 2
+                
+            elif mode_param == 't':
+                dice_per_player = num_param if num_param else 5
+                game_mode = 'total'
+                total_rounds = 1
+                
+            elif mode_param == 'p': 
+                max_players = min(max(num_param if num_param else 2, 2), 5)
+                game_mode = 'players'
+                dice_per_player = 1
+                total_rounds = 1
+
+            dice_source = 'players'
+            
+            user = message.from_user
+            username = user.username or user.first_name
+            
+            logger.info(f"[DEBUG] create_game: user={user.id}, bet={bet}")
+            
+            balance = get_user_balance(user.id)
+            
+            if balance < bet:
+                await message.reply(f"Недостаточно средств. Баланс: {balance:.2f} RUB")
+                return
+            
+            success = update_user_balance(user.id, bet, "game_bet")
+            if not success:
+                await message.reply("❌ Ошибка списания ставки. Попробуйте снова.")
+                return
+            
+            data = load_db()
+            game_counter = data.get('game_counter', 0)
+            game_counter += 1
+            game_id = str(game_counter)
+            
+            game = {
+                'game_id': game_id,
+                'emoji': emoji,
+                'command': command,
+                'creator_id': user.id,
+                'creator_name': username,
+                'max_players': max_players,
+                'players': [user.id],
+                'player_names': [username],
+                'player_scores': {username: 0},
+                'player_dice': {username: []},
+                'player_wins': {username: 0},
+                'player_round_wins': {username: 0},
+                'round_scores': {username: []},
+                'status': 'waiting',
+                'chat_id': message.chat.id,
+                'message_id': None,
+                'bet': bet,
+                'current_round': 1,
+                'rounds_completed': 0,
+                'game_mode': game_mode,
+                'target_wins': max_wins if mode_param == 'x' else 1,
+                'dice_per_player': dice_per_player,
+                'total_rounds': total_rounds,
+                'dice_source': dice_source,  
+                'auto_dice': False,  
+                'player_turn_order': [],
+                'current_turn_player': user.id,
+                'expected_dice_count': dice_per_player,
+                'throws_made': 0,
+                'waiting_for_throw': False,
+                'current_player_index': 0,
+                'current_player_id': user.id,
+                'bot_dice_thrown': False,
+                'round_results': [],
+                'last_round_update': None,
+                'message_link': None,
+                'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            data['games'][game_id] = game
+            data['game_counter'] = game_counter
+            save_db(data)
+            
+            logger.info(f"[DEBUG] Game #{game_id} created, bet {bet} deducted")
+            
+            
+            mode_display = ""
+            if mode_param == 'x':
+                mode_display = f"{game['target_wins']}WIN"
+            elif mode_param == 't':
+                mode_display = f"{dice_per_player}TOTAL"
+            elif mode_param == 'p':
+                mode_display = f"{max_players}PLAYER"
+            else:
+                mode_display = "CLASSIC"
+            
+            players_list = ""
+            for i, (player_id, player_name) in enumerate(zip(game['players'], game['player_names']), 1):
+                num_emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][i-1]
+                score = game['player_scores'][player_name]
+                
+                if player_name.startswith('user_'):
+                    player_display = str(player_id)
+                else:
+                    player_display = f"@{player_name}"
+                
+                players_list += f"{num_emoji} - {player_display} [{score}]\n"
+            
+            game_text = (
+                f"{emoji} {command.upper()} {mode_display} №{game_id}\n\n"
+                f"👥 Игроки:\n{players_list}\n"
+                f"💰 Ставка: {bet:.1f} RUB"
+            )
+            
+            keyboard = InlineKeyboardBuilder()
+            keyboard.button(
+                text=f"🎮 Присоединиться (1/{max_players})",
+                callback_data=f"join_game:{game_id}"
+            )
+            
+            sent_message = await message.reply(
+                game_text,
+                reply_markup=keyboard.as_markup()
+            )
+            
+            try:
+                chat_id = message.chat.id
+                message_id = sent_message.message_id
+                
+                if chat_id < 0:
+                    chat_id_str = str(chat_id).replace('-100', '')
+                    message_link = f"https://t.me/c/{chat_id_str}/{message_id}"
+                    game['message_link'] = message_link
+                else:
+                    message_link = f"https://t.me/{(await bot.get_me()).username}?start=game_{game_id}"
+                    game['message_link'] = message_link
+                
+                logger.info(f"[DEBUG] Message link created: {message_link}")
+            except Exception as e:
+                logger.error(f"Ошибка создания ссылки для игры #{game_id}: {e}")
+
+            data = load_db()
+            if game_id in data['games']:
+                data['games'][game_id]['message_id'] = sent_message.message_id
+                data['games'][game_id]['message_link'] = game.get('message_link')
+                save_db(data)
+            
+            logger.info(f"[DEBUG] Game #{game_id} setup complete")
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания игры: {e}", exc_info=True)
+            await message.reply("Ошибка создания игры")
+    
+    return game_handler
+
+cube = create_game("🎲", "cub")
+dart = create_game("🎯", "dart")
+basket = create_game("🏀", "basket")
+bowling = create_game("🎳", "bowl")
+football = create_game("⚽", "foot")
+
+@dp.message(F.text.regexp(r'^/(cub\d*[xpt]?)\s+(\d+)$'))
+async def handle_cub_command(message: Message):
+    await cube(message)
+
+@dp.message(F.text.regexp(r'^/(dart\d*[xpt]?)\s+(\d+)$'))
+async def handle_dart_command(message: Message):
+    await dart(message)
+
+@dp.message(F.text.regexp(r'^/(basket\d*[xpt]?)\s+(\d+)$'))
+async def handle_basket_command(message: Message):
+    await basket(message)
+
+@dp.message(F.text.regexp(r'^/(bowl\d*[xpt]?)\s+(\d+)$'))
+async def handle_bowling_command(message: Message):
+    await bowling(message)
+
+@dp.message(F.text.regexp(r'^/(foot\d*[xpt]?)\s+(\d+)$'))
+async def handle_football_command(message: Message):
+    await football(message)
+
+@dp.message(F.text.regexp(r'^/21cub\s+(\d+)$'))
+async def cmd_21cub(message: Message):
+    if not not_forwarded(message):
+        return
+    
+    try:
+        parts = message.text.split()
+        bet = float(parts[1])
+        
+        if bet < 10:
+            await message.reply("❌ Ставка не может быть меньше 10 RUB")
+            return
+        
+        user = message.from_user
+        username = user.username or user.first_name or f"user_{user.id}"
+        
+        balance = get_user_balance(user.id)
+        
+        if balance < bet:
+            await message.reply(f"❌ Недостаточно средств. Баланс: {balance:.2f} RUB")
+            return
+        
+        success = update_user_balance(user.id, bet, "game_bet")
+        if not success:
+            await message.reply("❌ Ошибка списания ставки. Попробуйте снова.")
+            return
+        
+        data = load_db()
+        game_counter = data.get('game_counter', 0)
+        game_counter += 1
+        game_id = str(game_counter)
+        
+        game = {
+            'game_id': game_id,
+            'emoji': '🎲',
+            'command': '21cub',
+            'creator_id': user.id,
+            'creator_name': username,
+            'max_players': 2,
+            'players': [user.id],
+            'player_names': [username],
+            'player_scores': {username: 0},
+            'player_dice': {username: []},
+            'player_status': {username: 'playing'},
+            'status': 'waiting',
+            'chat_id': message.chat.id,
+            'message_id': None,
+            'bet': bet,
+            'game_mode': '21game',
+            'current_player_name': username,
+            'players_finished': [],
+            'message_link': None,
+            'has_rolled_initial': False,
+            'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        data['games'][game_id] = game
+        data['game_counter'] = game_counter
+        save_db(data)
+        
+        players_list = f"1️⃣ - @{username} [0]\n2️⃣ - ⏳ Ожидает игрока..."
+        
+        game_text = (
+            f"🎲 21 CUBE №{game_id}\n\n"
+            f"👥 Игроки:\n{players_list}\n"
+            f"💰 Ставка: {bet:.1f} RUB\n"
+            f"🎯 Цель: набрать 21 очко!\n\n"
+            f"⚡ Ожидаем второго игрока..."
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎮 Присоединиться (1/2)", callback_data=f"join_21:{game_id}")]
+        ])
+        
+        sent_message = await message.reply(game_text, reply_markup=keyboard)
+        
+        data = load_db()
+        if game_id in data['games']:
+            data['games'][game_id]['message_id'] = sent_message.message_id
+            save_db(data)
+        
+        logger.info(f"[21] Игра #{game_id} создана")
+        
+    except Exception as e:
+        logger.error(f"[21] Ошибка создания: {e}", exc_info=True)
+        await message.reply("❌ Ошибка создания игры")
+
+@dp.callback_query(F.data.startswith("join_21:"))
+async def handle_join_21(callback: CallbackQuery):
+    try:
+        game_id = callback.data.split(":")[1]
+        user_id = callback.from_user.id
+        username = callback.from_user.username or callback.from_user.first_name or f"user_{user_id}"
+        
+        data = load_db()
+        
+        if game_id not in data['games']:
+            await callback.answer("❌ Игра не найдена", show_alert=True)
+            return
+        
+        game = data['games'][game_id]
+        
+        if game['status'] != 'waiting':
+            await callback.answer("❌ Игра уже началась", show_alert=True)
+            return
+        
+        if len(game['players']) >= 2:
+            await callback.answer("❌ Игра заполнена", show_alert=True)
+            return
+        
+        if user_id in game['players']:
+            await callback.answer("❌ Вы уже в игре", show_alert=True)
+            return
+        
+        balance = get_user_balance(user_id)
+        if balance < game['bet']:
+            await callback.answer(f"❌ Нужно {game['bet']} RUB", show_alert=True)
+            return
+        
+        success = update_user_balance(user_id, game['bet'], "game_bet")
+        if not success:
+            await callback.answer("❌ Ошибка списания", show_alert=True)
+            return
+        
+        import random
+        game['players'].append(user_id)
+        game['player_names'].append(username)
+        game['player_scores'][username] = 0
+        game['player_dice'][username] = []
+        game['player_status'][username] = 'playing'
+        
+        if random.choice([True, False]):
+            game['players'] = [game['players'][1], game['players'][0]]
+            game['player_names'] = [game['player_names'][1], game['player_names'][0]]
+        
+        game['current_player_name'] = game['player_names'][0]
+        game['status'] = 'playing'
+        
+        save_db(data)
+        
+        await callback.answer("✅ Вы присоединились!")
+        await update_21_message(game_id)
+        await asyncio.sleep(1)
+        await process_21_turn(game_id)
+        
+    except Exception as e:
+        logger.error(f"[21] Ошибка join: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+async def play_slots_game(message: Message, bet_amount: float):
+
+    
+    msg = await message.answer("🎰 Кручу барабаны...")
+    dice_msg = await message.answer_dice(emoji="🎰")
+    result = dice_msg.dice.value
+    await msg.delete()
+    
+    JACKPOT_MULTIPLIER = 4  
+    THREE_SAME_MULTIPLIER = 2 
+    
+    if result == 64:
+        win_amount = bet_amount * JACKPOT_MULTIPLIER
+        result_text = "🎰 ДЖЕКПОТ! 777!"
+        multiplier = JACKPOT_MULTIPLIER
+    elif result in [1, 22, 43]:
+        win_amount = bet_amount * THREE_SAME_MULTIPLIER
+        result_text = "🎰 ТРИ ОДИНАКОВЫХ!"
+        multiplier = THREE_SAME_MULTIPLIER
+    else:
+        win_amount = 0
+        result_text = f"🎰 ПРОИГРЫШ"
+        multiplier = 0
+    
+    new_balance = get_user_balance(message.from_user.id)
+    
+    if win_amount > 0:
+        update_user_balance(message.from_user.id, win_amount, "game_win")
+        await message.answer(
+            f"{result_text} x{multiplier}\n\n"
+            f"💰 ВЫИГРЫШ: {win_amount:.0f} RUB\n"
+            f"💳 БАЛАНС: {new_balance:.0f} RUB"
+        )
+    else:
+        await message.answer(
+            f"{result_text}\n\n"
+            f"💳 БАЛАНС: {new_balance:.0f} RUB"
+        )
+
+async def play_rps_game(message: Message, bet_amount: float, user_choice: str):
+
+    
+    msg = await message.answer("🤜🏻 Камень-Ножницы-Бумага... 🤛🏻")
+    await asyncio.sleep(0.5)
+    await msg.delete()
+    
+    WIN_MULTIPLIER = 3 
+    
+    PLAYER_WIN_CHANCE = 0.20  
+    
+    CHOICES_RU = {
+        "rock": "камень",
+        "scissors": "ножницы",
+        "paper": "бумага"
+    }
+    
+    random_num = random.random()
+    
+    if random_num < PLAYER_WIN_CHANCE:
+        if user_choice == "rock":
+            bot_choice = "scissors"  
+        elif user_choice == "scissors":
+            bot_choice = "paper"     
+        else:  
+            bot_choice = "rock"      
+        
+        user_name = CHOICES_RU.get(user_choice, user_choice)
+        bot_name = CHOICES_RU.get(bot_choice, bot_choice)
+        
+        win_amount = bet_amount * WIN_MULTIPLIER
+        result_text = f"✅ ПОБЕДА! {user_name} vs {bot_name} x{WIN_MULTIPLIER}"
+        update_user_balance(message.from_user.id, win_amount, "game_win")
+        
+    else:
+        
+        if random_num < 0.60:  
+            if user_choice == "rock":
+                bot_choice = "paper"     
+            elif user_choice == "scissors":
+                bot_choice = "rock"      
+            else:  
+                bot_choice = "scissors"  
+            
+            win_amount = 0
+            user_name = CHOICES_RU.get(user_choice, user_choice)
+            bot_name = CHOICES_RU.get(bot_choice, bot_choice)
+            result_text = f"❌ ПРОИГРЫШ! {user_name} vs {bot_name}"
+            
+        else:  
+            bot_choice = user_choice
+            win_amount = bet_amount
+            user_name = CHOICES_RU.get(user_choice, user_choice)
+            bot_name = CHOICES_RU.get(bot_choice, bot_choice)
+            result_text = f"🤝 НИЧЬЯ! {user_name} vs {bot_name}"
+            update_user_balance(message.from_user.id, win_amount, "game_win")
+    
+    new_balance = get_user_balance(message.from_user.id)
+    
+    await message.answer(
+        f"{result_text}\n\n"
+        f"💰 ВЫИГРЫШ: {win_amount:.0f} RUB\n"
+        f"💳 БАЛАНС: {new_balance:.0f} RUB"
+    )
+
+
+async def format_game_message(game_id: str, game: dict) -> str:
+
+    
+    game_names = {
+        'cub': 'CUBE',
+        'dart': 'DART',
+        'basket': 'BASKET',
+        'bowl': 'BOWLING',
+        'foot': 'FOOTBALL',
+        '21cub': '21 CUBE'
+    }
+    game_name = game_names.get(game.get('command', ''), game.get('command', 'GAME').upper())
+    
+    mode_display = ""
+    if game['game_mode'] == 'wins':
+        mode_display = f" {game.get('target_wins', 1)}WIN"
+    elif game['game_mode'] == 'total':
+        mode_display = f" {game.get('dice_per_player', 1)}TOTAL"
+    elif game['game_mode'] == 'players':
+        mode_display = f" {game.get('max_players', 2)}PLAYER"
+    elif game['game_mode'] == '21game':
+        mode_display = " 21GAME"
+    else:
+        mode_display = " CLASSIC"
+    
+    players_list = ""
+    current_player_name = None
+    
+    current_player_id = game.get('current_turn_player')
+    if current_player_id:
+        for uid, name in zip(game['players'], game['player_names']):
+            if uid == current_player_id:
+                current_player_name = name
+                break
+    
+    for i, player_name in enumerate(game['player_names'], 1):
+        score = game['player_scores'].get(player_name, 0)
+        status = ""
+        
+        if game.get('player_status'):
+            if game['player_status'].get(player_name) == 'stopped':
+                status = " 🛑"
+            elif game['player_status'].get(player_name) == 'bust':
+                status = " 💥"
+        
+        is_current = (game['status'] == 'playing' and game.get('waiting_for_throw') and 
+                     current_player_name == player_name and status == "")
+        
+        players_list += f"{i} - @{player_name} [{score}]{' 🎯' if is_current else ''}{status}\n"
+    
+    rules = ""
+    if game['game_mode'] == 'total':
+        rules = f"Игра ведется до {game.get('dice_per_player', 1)}х бросков!\n\n"
+    elif game['game_mode'] == 'wins':
+        rules = f"Игра ведется до {game.get('target_wins', 1)}х побед!\n\n"
+    elif game['game_mode'] == '21game':
+        rules = "Цель: набрать 21 очко!\n\n"
+    else:
+        rules = "Один бросок — и победитель!\n\n"
+    
+    emoji_map = {
+        'cub': '🎲',
+        'dart': '🎯',
+        'basket': '🏀',
+        'bowl': '🎳',
+        'foot': '⚽',
+        '21cub': '🎲'
+    }
+    emoji = emoji_map.get(game.get('command', 'cub'), '🎲')
+    
+    instruction = ""
+    if game['status'] == 'waiting':
+        instruction = f"— Отправьте <code>{emoji}</code> в ответ на это сообщение"
+    elif game['status'] == 'playing' and game.get('waiting_for_throw'):
+        if game.get('current_turn_player') is None:
+            instruction = f"— 🎲 Кто первый кинет <code>{emoji}</code> - тот и ходит!"
+        else:
+            instruction = f"— Сейчас ходит @{current_player_name}\n— Отправьте <code>{emoji}</code> в ответ на это сообщение"
+    
+    status_line = ""
+    if game['status'] == 'waiting':
+        status_line = f"\n⚡ Ожидаем игроков ({len(game['players'])}/{game['max_players']})"
+    elif game['status'] == 'playing' and game.get('waiting_for_throw'):
+        if game.get('current_turn_player') is None:
+            status_line = "\n🎲 Ожидаем первый бросок..."
+        else:
+            status_line = ""
+    
+    message_text = (
+        f"{emoji} {game_name}{mode_display} №{game_id}\n\n"
+        f"Игроки:\n{players_list}\n"
+        f"{rules}"
+        f"{instruction}"
+        f"{status_line}\n\n"
+        f"💰 Ставка: {game['bet']:.0f} RUB"
+    )
+    
+    return message_text
+
+async def update_21_message(game_id: str):
+    try:
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        
+        game = data['games'][game_id]
+        
+        players_list = ""
+        for i, player_name in enumerate(game['player_names'], 1):
+            score = game['player_scores'].get(player_name, 0)
+            status = game['player_status'].get(player_name, 'playing')
+            
+            status_emoji = ""
+            if status == 'stopped':
+                status_emoji = " 🛑"
+            elif status == 'bust':
+                status_emoji = " 💥"
+            
+            is_current = (game['status'] == 'playing' and game.get('current_player_name') == player_name and status == 'playing')
+            
+            players_list += f"{i} - @{player_name} [{score}]{' 🎯' if is_current else ''}{status_emoji}\n"
+        
+        game_text = (
+            f"🎲 21 CUBE №{game_id}\n\n"
+            f"Игроки:\n{players_list}\n"
+            f"Цель: набрать 21 очко!\n\n"
+            f"— Отправьте <code>🎲</code> в ответ на это сообщение\n\n"
+            f"💰 Ставка: {game['bet']:.0f} RUB"
+        )
+        
+        if game['status'] == 'playing' and game.get('current_player_name'):
+            game_text += f"\n🎲 Ход игрока @{game['current_player_name']}"
+        
+        try:
+            await bot.edit_message_text(
+                chat_id=game['chat_id'],
+                message_id=game['message_id'],
+                text=game_text,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e):
+                logger.error(f"[21] Update error: {e}")
+        
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"[21] Update error: {e}")
+
+async def process_21_turn(game_id: str):
+    try:
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        
+        game = data['games'][game_id]
+        
+        if game['status'] != 'playing':
+            return
+        
+        current = game['current_player_name']
+        
+        if game['player_status'].get(current) != 'playing':
+            await next_21_player(game_id)
+            return
+        
+        score = game['player_scores'].get(current, 0)
+        has_rolled = game.get('has_rolled_initial', False)
+        
+        other_name = None
+        for name in game['player_names']:
+            if name != current:
+                other_name = name
+                break
+        
+        if not has_rolled:
+            await send_message_safe(
+                game['chat_id'],
+                f"🎲 **ХОД ИГРОКА @{current}**\n\n"
+                f"@{current}: {score}\n"
+                f"@{other_name}: {game['player_scores'].get(other_name, 0)}\n\n"
+                f"— Ход игрока @{current}\n"
+                f"<b>КИДАЕМ 3 КУБИКА</b>",
+                parse_mode=ParseMode.HTML
+            )
+            
+            dice_values = []
+            total = 0
+            
+            for i in range(3):
+                if i > 0:
+                    await asyncio.sleep(2)
+                
+                dice_msg = await send_dice_safe(game['chat_id'], '🎲')
+                value = dice_msg.dice.value
+                dice_values.append(value)
+                total += value
+                logger.info(f"[21] Бросок {i+1}/3: {value}")
+            
+            game['player_scores'][current] = total
+            game['player_dice'][current] = dice_values
+            game['has_rolled_initial'] = True
+            
+            save_db(data)
+            
+            await update_21_message(game_id)
+            
+            if total > 21:
+                game['player_status'][current] = 'bust'
+                save_db(data)
+                await send_message_safe(game['chat_id'], f"💥 @{current} перебрал! ({total} > 21)")
+                
+                other_score = game['player_scores'].get(other_name, 0)
+                other_status = game['player_status'].get(other_name, 'playing')
+                
+                if other_score == 0 and other_status == 'playing':
+                    await send_message_safe(game['chat_id'], f"🏆 @{other_name} автоматически побеждает! (@{current} перебрал)")
+                    game['player_status'][other_name] = 'stopped'
+                    save_db(data)
+                    await finish_21_game(game_id)
+                else:
+                    await next_21_player(game_id)
+                    
+            elif total == 21:
+                game['player_status'][current] = 'stopped'
+                save_db(data)
+                await send_message_safe(game['chat_id'], f"🎉 @{current} набрал 21!")
+                
+                other_has_rolled = game.get('has_rolled_initial', False)
+                
+                if not other_has_rolled:
+                    await next_21_player(game_id)
+                else:
+                    await finish_21_game(game_id)
+            else:
+                await next_21_player(game_id)
+            return
+        
+        await show_21_buttons_in_chat(game_id, current, score)
+        
+    except Exception as e:
+        logger.error(f"[21] process_turn error: {e}", exc_info=True)
+
+async def show_21_buttons_in_chat(game_id: str, player_name: str, current_score: int):
+
+    try:
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        
+        game = data['games'][game_id]
+        
+        other_name = None
+        other_score = 0
+        for name in game['player_names']:
+            if name != player_name:
+                other_name = name
+                other_score = game['player_scores'].get(name, 0)
+                break
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🎲 БЕРЕМ", callback_data=f"21_take:{game_id}"),
+                InlineKeyboardButton(text="🛑 СТОП", callback_data=f"21_stop:{game_id}")
+            ]
+        ])
+        
+        message_text = (
+            f"🎲 **ХОД ИГРОКА @{player_name}**\n\n"
+            f"@{player_name}: {current_score}\n"
+            f"@{other_name}: {other_score}\n\n"
+            f"— Ход игрока @{player_name}, берём ещё?\n"
+            f"⏳ 60 сек\n\n"
+            f"<b>КИДАЕМ 1 КУБИК</b>"
+        )
+        
+        sent_msg = await bot.send_message(
+            game['chat_id'],
+            message_text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+        
+        user_id = None
+        for uid, name in zip(game['players'], game['player_names']):
+            if name == player_name:
+                user_id = uid
+                break
+        
+        if user_id:
+            asyncio.create_task(timeout_21_turn_with_counter_5sec(
+                game_id, user_id, player_name, current_score, sent_msg.message_id
+            ))
+        
+    except Exception as e:
+        logger.error(f"[21] show_21_buttons_in_chat error: {e}", exc_info=True)
+
+async def send_message_safe(chat_id: int, text: str, parse_mode: str = None, reply_markup=None):
+
+    global last_message_time
+    
+    current_time = asyncio.get_event_loop().time()
+    last_time = last_message_time.get(chat_id, 0)
+    time_since_last = current_time - last_time
+    
+    if time_since_last < MESSAGE_DELAY:
+        await asyncio.sleep(MESSAGE_DELAY - time_since_last)
+    
+    try:
+        result = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup
+        )
+        last_message_time[chat_id] = asyncio.get_event_loop().time()
+        return result
+    except Exception as e:
+        if "retry after" in str(e).lower():
+            import re
+            match = re.search(r'retry after (\d+)', str(e))
+            if match:
+                wait = int(match.group(1)) + 1
+                logger.warning(f"[MSG] Flood control, waiting {wait}s")
+                await asyncio.sleep(wait)
+                return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
+        raise
+
+async def send_deposit_notification(username: str, amount: float):
+
+    try:
+        if NOTIFICATION_CHAT_ID:
+            current_time = datetime.now().strftime("%H:%M")
+            
+            notification_text = (
+                f"✅ БАЛАНС ПОПОЛНЕН\n\n"
+                f"Пополнил баланс\n"
+                f"Пользователь: @{username}\n\n"
+                f"Сумма: {amount:.0f} RUB\n"
+                f"{current_time}\n\n"
+                f"Играть\n"
+                f"Чат с играми\n\n"
+                f"Пополнить баланс"
+            )
+            
+            await bot.send_message(NOTIFICATION_CHAT_ID, notification_text)
+            logger.info(f"Отправлено уведомление о депозите @{username} на {amount} RUB")
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления о депозите: {e}")
+
+
+async def send_withdrawal_notification(username: str, amount: float, withdrawal_id: int):
+
+    try:
+        if NOTIFICATION_CHAT_ID:
+            current_time = datetime.now().strftime("%H:%M")
+            
+            notification_text = (
+                f"💸 ЗАЯВКА НА ВЫВОД\n\n"
+                f"Запросил вывод\n"
+                f"Пользователь: @{username}\n\n"
+                f"Сумма: {amount:.0f} RUB\n"
+                f"{current_time}\n\n"
+                f"ID заявки: #{withdrawal_id}\n"
+                f"Статус: ⏳ Ожидает проверки"
+            )
+            
+            await bot.send_message(NOTIFICATION_CHAT_ID, notification_text)
+            logger.info(f"Отправлено уведомление о выводе @{username} на {amount} RUB")
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления о выводе: {e}")
+
+
+async def send_withdrawal_approved_notification(username: str, amount: float, withdrawal_id: int):
+
+    try:
+        if NOTIFICATION_CHAT_ID:
+            current_time = datetime.now().strftime("%H:%M")
+            
+            notification_text = (
+                f"✅ ВЫВОД ОДОБРЕН\n\n"
+                f"Вывел средства\n"
+                f"Пользователь: @{username}\n\n"
+                f"Сумма: {amount:.0f} RUB\n"
+                f"{current_time}\n\n"
+                f"ID заявки: #{withdrawal_id}\n"
+                f"Статус: ✅ Выполнен"
+            )
+            
+            await bot.send_message(NOTIFICATION_CHAT_ID, notification_text)
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления об одобрении вывода: {e}")
+
+async def timeout_21_turn_with_counter_5sec(game_id: str, user_id: int, player_name: str, score_at_start: int, message_id: int):
+
+    try:
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎲 БЕРЕМ", callback_data=f"21_take:{game_id}"),
+             InlineKeyboardButton(text="🛑 СТОП", callback_data=f"21_stop:{game_id}")]
+        ])
+        
+        chat_id = data['games'][game_id]['chat_id']
+        
+        for remaining in range(60, -1, -5):
+            data = load_db()
+            if game_id not in data['games']:
+                return
+            game = data['games'][game_id]
+            
+            if (game.get('current_player_name') != player_name or 
+                game['player_status'].get(player_name) != 'playing'):
+                return
+            
+            other_name = None
+            other_score = 0
+            for name in game['player_names']:
+                if name != player_name:
+                    other_name = name
+                    other_score = game['player_scores'].get(name, 0)
+                    break
+            
+            current_score = game['player_scores'].get(player_name, score_at_start)
+            
+            message_text = (
+                f"🎲 **ХОД ИГРОКА @{player_name}**\n\n"
+                f"@{player_name}: {current_score}\n"
+                f"@{other_name}: {other_score}\n\n"
+                f"— Ход игрока @{player_name}, берём ещё?\n"
+                f"⏳ {remaining} сек\n\n"
+                f"<b>КИДАЕМ 1 КУБИК</b>"
+            )
+            
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=message_text,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                if "message is not modified" not in str(e):
+                    logger.error(f"[21] Edit error: {e}")
+            
+            if remaining <= 0:
+                break
+            
+            await asyncio.sleep(5)
+        
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        game = data['games'][game_id]
+        
+        if (game['status'] == 'playing' and 
+            game.get('current_player_name') == player_name and 
+            game['player_status'].get(player_name) == 'playing'):
+            
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except:
+                pass
+            
+            game['player_status'][player_name] = 'stopped'
+            save_db(data)
+            
+            await bot.send_message(chat_id, f"⏰ Время вышло! @{player_name} автоматически остановлен.")
+            await update_21_message(game_id)
+            await next_21_player(game_id)
+            
+    except Exception as e:
+        logger.error(f"[21] timeout error: {e}", exc_info=True)
+
+async def send_dice_safe(chat_id: int, emoji: str = '🎲', retries: int = 3) -> Message:
+
+    for attempt in range(retries):
+        try:
+            return await bot.send_dice(chat_id=chat_id, emoji=emoji)
+        except Exception as e:
+            if "retry after" in str(e).lower():
+                import re
+                match = re.search(r'retry after (\d+)', str(e))
+                if match:
+                    wait = int(match.group(1)) + 1
+                    logger.warning(f"[DICE] Flood control, waiting {wait}s (attempt {attempt+1}/{retries})")
+                    await asyncio.sleep(wait)
+                else:
+                    await asyncio.sleep(2)
+            else:
+                raise
+    raise Exception("Failed to send dice after retries")
+
+@dp.callback_query(F.data.startswith("21_take:"))
+async def handle_21_take(callback: CallbackQuery):
+    try:
+        game_id = callback.data.split(":")[1]
+        user_id = callback.from_user.id
+        
+        data = load_db()
+        if game_id not in data['games']:
+            await callback.answer("❌ Игра не найдена", show_alert=True)
+            return
+        
+        game = data['games'][game_id]
+        current = game.get('current_player_name')
+        
+        cur_user_id = None
+        for uid, name in zip(game['players'], game['player_names']):
+            if name == current:
+                cur_user_id = uid
+                break
+        
+        if cur_user_id != user_id:
+            await callback.answer("❌ Сейчас не ваш ход!", show_alert=True)
+            return
+        
+        if game['player_status'].get(current) != 'playing':
+            await callback.answer("❌ Вы уже остановились!", show_alert=True)
+            return
+        
+        current_score = game['player_scores'].get(current, 0)
+        if current_score >= 21:
+            await callback.answer("❌ Вы не можете больше брать!", show_alert=True)
+            return
+        
+        await callback.answer("🎲 Кидаем кубик...")
+        
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        
+        await asyncio.sleep(0.5)
+        
+        dice_msg = await send_dice_safe(game['chat_id'], '🎲')
+        dice_value = dice_msg.dice.value
+        new_score = current_score + dice_value
+        
+        game['player_scores'][current] = new_score
+        game['player_dice'][current].append(dice_value)
+        
+        save_db(data)
+        
+        await update_21_message(game_id)
+        
+        other_name = None
+        for name in game['player_names']:
+            if name != current:
+                other_name = name
+                break
+        
+        if new_score > 21:
+            game['player_status'][current] = 'bust'
+            save_db(data)
+            await send_message_safe(game['chat_id'], f"💥 @{current} перебрал! ({new_score} > 21)")
+            
+            other_score = game['player_scores'].get(other_name, 0)
+            other_status = game['player_status'].get(other_name, 'playing')
+            
+            if other_status == 'playing':
+                if other_score == 0 and not game.get('has_rolled_initial', False):
+                    await send_message_safe(game['chat_id'], f"🏆 @{other_name} автоматически побеждает! (@{current} перебрал)")
+                    game['player_status'][other_name] = 'stopped'
+                    save_db(data)
+                    await finish_21_game(game_id)
+                else:
+                    await next_21_player(game_id)
+            else:
+                await finish_21_game(game_id)
+                
+        elif new_score == 21:
+            game['player_status'][current] = 'stopped'
+            save_db(data)
+            await send_message_safe(game['chat_id'], f"🎉 @{current} набрал 21!")
+            
+            other_status = game['player_status'].get(other_name, 'playing')
+            other_has_rolled = game.get('has_rolled_initial', False)
+            
+            if not other_has_rolled and other_status == 'playing':
+                await next_21_player(game_id)
+            else:
+                await finish_21_game(game_id)
+        else:
+            await next_21_player(game_id)
+        
+    except Exception as e:
+        logger.error(f"[21] take error: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("21_stop:"))
+async def handle_21_stop(callback: CallbackQuery):
+    try:
+        game_id = callback.data.split(":")[1]
+        user_id = callback.from_user.id
+        
+        data = load_db()
+        if game_id not in data['games']:
+            await callback.answer("❌ Игра не найдена", show_alert=True)
+            return
+        
+        game = data['games'][game_id]
+        current = game.get('current_player_name')
+        
+        cur_user_id = None
+        for uid, name in zip(game['players'], game['player_names']):
+            if name == current:
+                cur_user_id = uid
+                break
+        
+        if cur_user_id != user_id:
+            await callback.answer("❌ Сейчас не ваш ход!", show_alert=True)
+            return
+        
+        score = game['player_scores'].get(current, 0)
+        
+        game['player_status'][current] = 'stopped'
+        save_db(data)
+        
+        await callback.answer(f"✅ Стоп! {score} очков", show_alert=True)
+        
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        
+        await update_21_message(game_id)
+        await next_21_player(game_id)
+        
+    except Exception as e:
+        logger.error(f"[21] stop error: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+async def next_21_player(game_id: str):
+    try:
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        
+        game = data['games'][game_id]
+        
+        active = [n for n in game['player_names'] if game['player_status'].get(n) == 'playing']
+        
+        if not active:
+            await finish_21_game(game_id)
+            return
+        
+        if len(active) == 1:
+            winner = active[0]
+            await send_message_safe(game['chat_id'], f"🏆 @{winner} автоматически побеждает! (соперник выбыл)")
+            
+            await finish_21_game_with_winner(game_id, winner)
+            return
+        
+        current_idx = game['player_names'].index(game['current_player_name'])
+        next_idx = (current_idx + 1) % len(game['player_names'])
+        
+        while game['player_status'].get(game['player_names'][next_idx]) != 'playing':
+            next_idx = (next_idx + 1) % len(game['player_names'])
+            if next_idx == current_idx:
+                await finish_21_game(game_id)
+                return
+        
+        game['current_player_name'] = game['player_names'][next_idx]
+        if game['player_scores'].get(game['current_player_name'], 0) == 0:
+            game['has_rolled_initial'] = False
+        
+        save_db(data)
+        
+        await update_21_message(game_id)
+        await asyncio.sleep(1.5)
+        await process_21_turn(game_id)
+        
+    except Exception as e:
+        logger.error(f"[21] next error: {e}", exc_info=True)
+
+
+async def finish_21_game_with_winner(game_id: str, winner_name: str):
+
+    try:
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        
+        game = data['games'][game_id]
+        chat_id = game['chat_id']
+        msg_id = game['message_id']
+        
+        pot = game['bet'] * len(game['players'])
+        net, fee = calculate_winnings_with_fee(pot)
+        
+        for uid, name in zip(game['players'], game['player_names']):
+            if name == winner_name:
+                update_user_balance(uid, net, "game_win")
+                break
+        
+        players_list = "\n".join([f"{i+1}️⃣ - @{n} [{game['player_scores'][n]}]" for i, n in enumerate(game['player_names'])])
+        
+        final = f"🎲 21 CUBE №{game_id}\n\n{players_list}\n\n🏆 Победитель: @{winner_name} | Выигрыш: {net:.1f} RUB"
+        
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except:
+            pass
+        
+        await send_message_safe(chat_id, final)
+        
+        if game_id in data['games']:
+            del data['games'][game_id]
+            save_db(data)
+        
+    except Exception as e:
+        logger.error(f"[21] finish_with_winner error: {e}", exc_info=True)
+
+async def finish_21_game(game_id: str):
+    try:
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        
+        game = data['games'][game_id]
+        chat_id = game['chat_id']
+        msg_id = game['message_id']
+        
+        valid = []
+        for name in game['player_names']:
+            score = game['player_scores'].get(name, 0)
+            status = game['player_status'].get(name, 'playing')
+            if status != 'bust' and score <= 21:
+                valid.append((name, score))
+        
+        if not valid:
+            result = "❌ Все игроки проиграли (перебор)! Ставки возвращены"
+            for n in game['player_names']:
+                for uid, name in zip(game['players'], game['player_names']):
+                    if name == n:
+                        update_user_balance(uid, game['bet'], "game_win")
+        else:
+            valid.sort(key=lambda x: x[1], reverse=True)
+            max_score = valid[0][1]
+            winners = [w[0] for w in valid if w[1] == max_score]
+            pot = game['bet'] * len(game['players'])
+            net, fee = calculate_winnings_with_fee(pot)
+            
+            if len(winners) == 1:
+                for uid, name in zip(game['players'], game['player_names']):
+                    if name == winners[0]:
+                        update_user_balance(uid, net, "game_win")
+                        break
+                result = f"🏆 Победитель: @{winners[0]} | Выигрыш: {net:.1f} RUB"
+            else:
+                result = f"🤝 Ничья: {', '.join(['@'+w for w in winners])} | Ставки возвращены"
+                for n in game['player_names']:
+                    for uid, name in zip(game['players'], game['player_names']):
+                        if name == n:
+                            update_user_balance(uid, game['bet'], "game_win")
+        
+        players_list = "\n".join([f"{i+1}️⃣ - @{n} [{game['player_scores'][n]}]" for i, n in enumerate(game['player_names'])])
+        
+        final = f"🎲 21 CUBE №{game_id}\n\n{players_list}\n\n{result}"
+        
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except:
+            pass
+        
+        await send_message_safe(chat_id, final)
+        
+        if game_id in data['games']:
+            del data['games'][game_id]
+            save_db(data)
+        
+    except Exception as e:
+        logger.error(f"[21] finish error: {e}", exc_info=True)
+
+async def update_game_message(game_id: str):
+    try:
+        data = load_db()
+        game = data['games'].get(game_id)
+        if not game:
+            logger.error(f"Игра #{game_id} не найдена в БД")
+            return
+        
+        if game.get('command') == '21cub' or game.get('game_mode') == '21game':
+            await update_21_message(game_id)
+            return
+        
+        message_text = await format_game_message(game_id, game)
+        
+        keyboard = InlineKeyboardBuilder()
+        
+        if game['status'] == 'waiting':
+            if len(game['players']) < game['max_players']:
+                keyboard.button(
+                    text=f"🎮 Присоединиться ({len(game['players'])}/{game['max_players']})",
+                    callback_data=f"join_game:{game_id}"
+                )
+            keyboard.button(
+                text="⛔ Стоп (удалить игру)",
+                callback_data=f"stop_game:{game_id}"
+            )
+            keyboard.adjust(1)
+        
+        try:
+            await bot.edit_message_text(
+                chat_id=game['chat_id'],
+                message_id=game['message_id'],
+                text=message_text,
+                reply_markup=keyboard.as_markup() if keyboard.buttons else None,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e):
+                logger.error(f"❌ Ошибка обновления сообщения игры: {e}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка update_game_message: {e}", exc_info=True)
+
+
+@dp.callback_query(F.data.startswith("join_game:"))
+async def handle_join_game(callback: CallbackQuery):
+    try:
+        game_id = callback.data.split(":")[1]
+        
+        logger.info(f"[DEBUG] handle_join_game START: user={callback.from_user.id}, game_id={game_id}")
+        
+        data = load_db()
+        if game_id not in data['games']:
+            logger.error(f"[DEBUG] Game {game_id} not found in DB")
+            await callback.answer("Игра не найдена", show_alert=True)
+            return
+        
+        game = data['games'][game_id]
+        user = callback.from_user
+        user_id_str = str(user.id)
+        
+        if user.username:
+            username = user.username
+        else:
+            username = str(user.id)
+        
+        logger.info(f"[DEBUG] User info: id={user.id}, username={username}")
+        logger.info(f"[DEBUG] Game info: bet={game['bet']}, players={game.get('players', [])}")
+        
+        logger.info(f"[DEBUG] Step 1: get_or_create_user")
+        user_data = get_or_create_user(user.id, username)
+        
+        logger.info(f"[DEBUG] Step 2: reload DB after user creation")
+        data = load_db()
+        
+        if game_id not in data['games']:
+            logger.error(f"[DEBUG] Game {game_id} disappeared after reload!")
+            await callback.answer("Ошибка: игра не найдена", show_alert=True)
+            return
+        
+        game = data['games'][game_id]
+        
+        if user_id_str not in data['menu_users']:
+            logger.error(f"[DEBUG] User {user_id_str} not in DB after get_or_create_user!")
+            await callback.answer("❌ Ошибка: пользователь не создан", show_alert=True)
+            return
+        
+        current_balance = data['menu_users'][user_id_str]['balance']
+        logger.info(f"[DEBUG] Current balance for {user_id_str}: {current_balance}")
+        
+        if current_balance < game['bet']:
+            logger.error(f"[DEBUG] Insufficient balance: {current_balance} < {game['bet']}")
+            await callback.answer(f"Нужно {game['bet']} RUB\nВаш баланс: {current_balance:.2f} RUB", show_alert=True)
+            return
+        
+        if user.id in game['players']:
+            logger.info(f"[DEBUG] User {user.id} already in game")
+            await callback.answer("Вы уже в игре", show_alert=True)
+            return
+        
+        if len(game['players']) >= game['max_players']:
+            logger.info(f"[DEBUG] Game {game_id} is full")
+            await callback.answer("Игра заполнена", show_alert=True)
+            return
+        
+        if game['status'] != 'waiting':
+            logger.info(f"[DEBUG] Game {game_id} already started")
+            await callback.answer("Игра уже началась", show_alert=True)
+            return
+        
+        logger.info(f"[DEBUG] Step 3: deducting bet {game['bet']} from {user_id_str}")
+        
+        success = update_user_balance(user.id, game['bet'], "game_bet")
+        
+        logger.info(f"[DEBUG] update_user_balance result: {success}")
+        
+        if not success:
+            await callback.answer("❌ Ошибка списания ставки", show_alert=True)
+            return
+        
+        logger.info(f"[DEBUG] Step 4: reload DB after bet deduction")
+        data = load_db()
+        game = data['games'][game_id]
+        
+        if user_id_str in data['menu_users']:
+            new_balance = data['menu_users'][user_id_str]['balance']
+            total_spent = data['menu_users'][user_id_str].get('total_spent', 0)
+            logger.info(f"[DEBUG] After deduction: balance={new_balance}, total_spent={total_spent}")
+        
+        game['players'].append(user.id)
+        game['player_names'].append(username)
+        game['player_scores'][username] = 0
+        game['player_dice'][username] = []
+        game['player_wins'][username] = 0
+        game['player_round_wins'][username] = 0
+        game['round_scores'][username] = []
+        
+        save_db(data)
+        logger.info(f"[DEBUG] User {user_id_str} added to game {game_id}")
+        
+        await callback.answer(f"✅ Вы присоединились к игре! Ставка {game['bet']} RUB списана")
+        
+        game = data['games'][game_id]
+        
+        mode_display = ""
+        if game.get('game_mode') == 'wins':
+            mode_display = f"{game.get('target_wins', 1)}WIN"
+        elif game.get('game_mode') == 'total':
+            mode_display = f"{game.get('dice_per_player', 1)}TOTAL"
+        elif game.get('game_mode') == 'players':
+            mode_display = f"{game.get('max_players', 2)}PLAYER"
+        else:
+            mode_display = "CLASSIC"
+        
+        players_list = ""
+        for i, (player_id, player_name) in enumerate(zip(game['players'], game['player_names']), 1):
+            num_emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][i-1]
+            score = game['player_scores'][player_name]
+            
+            if player_name.startswith('user_'):
+                player_display = str(player_id)
+            else:
+                player_display = f"@{player_name}"
+            
+            players_list += f"{num_emoji} - {player_display} [{score}]\n"
+        
+        game_text = (
+            f"{game['emoji']} {game['command'].upper()} {mode_display} №{game_id}\n\n"
+            f"👥 Игроки:\n{players_list}\n"
+            f"💰 Ставка: {game['bet']:.1f} RUB"
+        )
+        
+        keyboard = InlineKeyboardBuilder()
+        
+        if len(game['players']) < game['max_players']:
+            keyboard.button(
+                text=f"🎮 Присоединиться ({len(game['players'])}/{game['max_players']})",
+                callback_data=f"join_game:{game_id}"
+            )
+        keyboard.button(
+            text="⛔ Стоп (удалить игру)",
+            callback_data=f"stop_game:{game_id}"
+        )
+        keyboard.adjust(1)
+        
+        sent_message = await callback.message.answer(
+            game_text,
+            reply_markup=keyboard.as_markup()
+        )
+        
+        try:
+            chat_id = game['chat_id']
+            message_id = sent_message.message_id
+            
+            if chat_id < 0:
+                chat_id_str = str(chat_id).replace('-100', '')
+                message_link = f"https://t.me/c/{chat_id_str}/{message_id}"
+                game['message_link'] = message_link
+            else:
+                message_link = f"https://t.me/{(await bot.get_me()).username}?start=game_{game_id}"
+                game['message_link'] = message_link
+            
+            logger.info(f"[DEBUG] Message link created: {message_link}")
+        except Exception as e:
+            logger.error(f"Ошибка создания ссылки для игры #{game_id}: {e}")
+        
+        data = load_db()
+        if game_id in data['games']:
+            data['games'][game_id]['message_id'] = sent_message.message_id
+            data['games'][game_id]['message_link'] = game.get('message_link')
+            save_db(data)
+        
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        
+        if len(game['players']) == game['max_players']:
+            logger.info(f"[DEBUG] Game {game_id} is full, starting...")
+            await start_game(game_id)
+        else:
+            logger.info(f"[DEBUG] Game {game_id} waiting for more players")
+        
+    except Exception as e:
+        logger.error(f"[DEBUG] ERROR in handle_join_game: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка присоединения", show_alert=True)
+
+async def start_game(game_id):
+    try:
+        data = load_db()
+        if game_id not in data['games']:
+            return
+        
+        game = data['games'][game_id]
+        
+        if game['status'] == 'playing':
+            return
+        
+        game['status'] = 'playing'
+        game['waiting_for_throw'] = True
+        game['throws_made'] = 0
+        game['current_turn_player'] = None  
+        game['player_turn_order'] = []  
+        
+        save_db(data)
+        await update_game_message(game_id)
+        
+    except Exception as e:
+        logger.error(f"Ошибка start_game: {e}")
+
+async def process_round_results(game_id):
+    try:
+        data = load_db()
+        game = data['games'][game_id]
+        
+        logger.info(f"[DEBUG] process_round_results: game_mode={game.get('game_mode')}, command={game.get('command')}")
+
+        game['players_finished'] = []
+        
+        round_scores = {}
+        for player_name in game['player_names']:
+            if game['game_mode'] in ['total', '21game']:
+                round_scores[player_name] = game['player_scores'].get(player_name, 0)
+            else:
+                dice_values = game['player_dice'].get(player_name, [])
+                round_scores[player_name] = dice_values[-1] if dice_values else 0
+        
+        max_score = max(round_scores.values())
+        round_winners = [name for name, score in round_scores.items() if score == max_score]
+        
+        round_result = {
+            'round': game['current_round'],
+            'scores': round_scores.copy(),
+            'winners': round_winners.copy()
+        }
+        
+        if 'round_results' not in game:
+            game['round_results'] = []
+        game['round_results'].append(round_result)
+        
+        round_summary = ""
+        for name, score in round_scores.items():
+            player_display = f"@{name}" if not name.startswith('user_') else name
+            round_summary += f"{player_display}: {score}, "
+        round_summary = round_summary.rstrip(", ")
+        
+        winners_display = []
+        for w in round_winners:
+            winners_display.append(f"@{w}" if not w.startswith('user_') else w)
+        
+        await bot.send_message(
+            game['chat_id'],
+            f"🎲 Раунд {game['current_round']}: {round_summary} | Победитель: {', '.join(winners_display)}"
+        )
+
+        if game['game_mode'] == 'total':
+            await finish_total_game(game_id, round_winners)
+            return
+        
+        if game['game_mode'] == '21game':
+            return
+        
+        if game['game_mode'] == 'wins' and len(round_winners) == 1:
+            winner = round_winners[0]
+            game['player_round_wins'][winner] = game['player_round_wins'].get(winner, 0) + 1
+            
+            score_message = " | ".join([f"@{name}: {game['player_round_wins'].get(name, 0)}" for name in game['player_names']])
+            await bot.send_message(game['chat_id'], f"📊 Счет: {score_message}")
+            
+            if game['player_round_wins'][winner] >= game['target_wins']:
+                await finish_wins_game(game, [winner])
+                return
+        
+        if game['game_mode'] == 'classic':
+            await finish_classic_game(game_id, round_winners)
+            return
+        
+        if game['game_mode'] == 'players':
+            await finish_players_game(game_id, round_winners)
+            return
+        
+        for player_name in game['player_names']:
+            game['player_dice'][player_name] = []
+            if game['game_mode'] not in ['total', '21game']:
+                game['player_scores'][player_name] = 0
+        
+        game['current_round'] += 1
+        game['throws_made'] = 0
+        game['waiting_for_throw'] = True
+        game['current_turn_player'] = None
+        game['player_turn_order'] = []
+        
+        save_db(data)
+        await update_game_message(game_id)
+        
+        
+    except Exception as e:
+        logger.error(f"Ошибка process_round_results: {e}", exc_info=True)
+
+async def finish_total_game(game_id, winners):
+
+    try:
+        data = load_db()
+        game = data['games'][game_id]
+        
+        chat_id = game['chat_id']
+        message_id = game['message_id']
+        
+        game_names = {
+            'cub': 'CUBE',
+            'dart': 'DART',
+            'basket': 'BASKET',
+            'bowl': 'BOWLING',
+            'foot': 'FOOTBALL'
+        }
+        game_name = game_names.get(game.get('command', ''), game.get('command', 'GAME').upper())
+        dice_count = game.get('dice_per_player', 1)
+        
+        players_list = ""
+        for i, (player_id, player_name) in enumerate(zip(game['players'], game['player_names']), 1):
+            score = game['player_scores'].get(player_name, 0)
+            
+            if player_name.startswith('user_'):
+                player_display = str(player_id)
+            else:
+                player_display = f"@{player_name}"
+            
+            players_list += f"{i} - {player_display} [{score}]\n"
+        
+        pot = game['bet'] * len(game['players'])
+        net_winnings, fee = calculate_winnings_with_fee(pot)
+        
+        if len(winners) == 1:
+            winner = winners[0]
+            winner_id = None
+            for uid, name in zip(game['players'], game['player_names']):
+                if name == winner:
+                    winner_id = uid
+                    break
+            
+            if winner_id:
+                logger.info(f"[TOTAL] Adding win to {winner_id}: {net_winnings}")
+                update_user_balance(winner_id, net_winnings, "game_win")
+            
+            winner_display = f"@{winner}" if not winner.startswith('user_') else winner
+            result_text = f"🏆 Победитель: {winner_display}"
+            win_text = f"💎 Выигрыш: {net_winnings:.1f} RUB (комиссия 5%: {fee:.1f} RUB)"
+        else:
+            winners_display = []
+            for w in winners:
+                winners_display.append(f"@{w}" if not w.startswith('user_') else w)
+            result_text = f"🤝 Ничья: " + ", ".join(winners_display)
+            win_text = f"💰 Ставки возвращены"
+            
+            for player_name in game['player_names']:
+                for uid, name in zip(game['players'], game['player_names']):
+                    if name == player_name:
+                        update_user_balance(uid, game['bet'], "game_win")
+        
+        data = load_db()
+        save_db(data)
+        
+        final_text = f"""🎲 {game_name} {dice_count}T №{game_id}
+
+{win_text}
+
+👥 Игроки:
+{players_list}
+{result_text}"""
+        
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.error(f"Ошибка удаления: {e}")
+        
+        await bot.send_message(chat_id, final_text)
+        
+        if game_id in data['games']:
+            del data['games'][game_id]
+            save_db(data)
+        
+        logger.info(f"Игра #{game_id} завершена (total)")
+        
+    except Exception as e:
+        logger.error(f"Ошибка finish_total_game: {e}", exc_info=True)
+
+
+@dp.message(F.dice, F.func(not_forwarded))
+async def handle_dice(message: Message):
+    try:
+        user_id = message.from_user.id
+        username = message.from_user.username or str(user_id)
+        
+        if message.from_user.is_bot:
+            return
+        
+        logger.info(f"[DICE] User {user_id} threw {message.dice.emoji} with value {message.dice.value}")
+        
+        data = load_db()
+        current_game = None
+        current_game_id = None
+        
+        for game_id, game in data['games'].items():
+            if game.get('status') == 'playing' and game.get('waiting_for_throw'):
+                expected_emoji = game.get('emoji', '🎲')
+                
+                if message.dice.emoji == expected_emoji:
+                    if user_id not in game.get('players', []):
+                        await message.reply("❌ Вы не участвуете в этой игре!")
+                        return
+                    
+                    if game.get('current_turn_player') is None:
+                        game['current_turn_player'] = user_id
+                        if 'player_turn_order' not in game:
+                            game['player_turn_order'] = []
+                        if user_id not in game['player_turn_order']:
+                            game['player_turn_order'].append(user_id)
+                        current_game = game
+                        current_game_id = game_id
+                        break
+                    elif game.get('current_turn_player') == user_id:
+                        current_game = game
+                        current_game_id = game_id
+                        break
+                    else:
+                        current_player_name = None
+                        for uid, name in zip(game['players'], game['player_names']):
+                            if uid == game.get('current_turn_player'):
+                                current_player_name = name
+                                break
+                        await message.reply(f"⏳ Сейчас не ваш ход! Ходит @{current_player_name}")
+                        return
+        
+        if not current_game:
+            for game_id, game in data['games'].items():
+                if game.get('status') == 'playing' and user_id in game.get('players', []):
+                    current_player_id = game.get('current_turn_player')
+                    if current_player_id is not None:
+                        current_player_name = None
+                        for uid, name in zip(game['players'], game['player_names']):
+                            if uid == current_player_id:
+                                current_player_name = name
+                                break
+                        await message.reply(f"⏳ Сейчас не ваш ход! Ходит @{current_player_name}")
+                    return
+            await message.reply("❌ У вас нет активных игр. Создайте или присоединитесь к игре!")
+            return
+        
+        if username not in current_game['player_dice']:
+            current_game['player_dice'][username] = []
+        
+        dice_value = message.dice.value
+        current_game['player_dice'][username].append(dice_value)
+        
+        if current_game.get('game_mode') in ['total']:
+            current_game['player_scores'][username] = sum(current_game['player_dice'][username])
+        else:
+            current_game['player_scores'][username] = dice_value
+        
+        current_game['throws_made'] = current_game.get('throws_made', 0) + 1
+        
+        data['games'][current_game_id] = current_game
+        save_db(data)
+        
+        await update_game_message(current_game_id)
+        
+        expected = current_game.get('expected_dice_count', 1)
+        
+        if current_game['throws_made'] >= expected:
+            current_game['throws_made'] = 0
+            
+            if user_id not in current_game.get('player_turn_order', []):
+                if 'player_turn_order' not in current_game:
+                    current_game['player_turn_order'] = []
+                current_game['player_turn_order'].append(user_id)
+            
+            players_that_threw = current_game.get('player_turn_order', [])
+            all_players = current_game['players'].copy()
+            
+            players_left = [p for p in all_players if p not in players_that_threw]
+            
+            if players_left:
+                next_player_id = players_left[0]
+                current_game['current_turn_player'] = next_player_id
+                
+                next_player_name = None
+                for uid, name in zip(current_game['players'], current_game['player_names']):
+                    if uid == next_player_id:
+                        next_player_name = name
+                        break
+                
+                try:
+                    await bot.send_message(
+                        next_player_id,
+                        f"🎲 Ваш ход в игре #{current_game_id}!\nКидайте {current_game['emoji']} в чате игры."
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось отправить сообщение игроку {next_player_id}: {e}")
+                
+                await bot.send_message(
+                    current_game['chat_id'],
+                    f"🎲 Теперь ходит @{next_player_name}\nКидайте {current_game['emoji']}!"
+                )
+                
+            else:
+                current_game['current_turn_player'] = None  
+                current_game['player_turn_order'] = []  
+                
+                data['games'][current_game_id] = current_game
+                save_db(data)
+                
+                await process_round_results(current_game_id)
+                return
+            
+            data['games'][current_game_id] = current_game
+            save_db(data)
+        
+    except Exception as e:
+        logger.error(f"Ошибка handle_dice: {e}", exc_info=True)
+        await message.reply("❌ Ошибка при обработке броска")
+
+async def finish_classic_game(game_id, winners):
+
+    try:
+        data = load_db()
+        game = data['games'][game_id]
+        
+        chat_id = game['chat_id']
+        message_id = game['message_id']
+        
+        game_names = {
+            'cub': 'CUBE',
+            'dart': 'DART',
+            'basket': 'BASKET',
+            'bowl': 'BOWLING',
+            'foot': 'FOOTBALL'
+        }
+        game_name = game_names.get(game.get('command', ''), game.get('command', 'GAME').upper())
+        
+        players_list = ""
+        for i, (player_id, player_name) in enumerate(zip(game['players'], game['player_names']), 1):
+            score = game['player_scores'].get(player_name, 0)
+            
+            if player_name.startswith('user_'):
+                player_display = str(player_id)
+            else:
+                player_display = f"@{player_name}"
+            
+            players_list += f"{i} - {player_display} [{score}]\n"
+        
+        pot = game['bet'] * len(game['players'])
+        net_winnings, fee = calculate_winnings_with_fee(pot)
+        
+        if len(winners) == 1:
+            winner = winners[0]
+            winner_id = None
+            for uid, name in zip(game['players'], game['player_names']):
+                if name == winner:
+                    winner_id = uid
+                    break
+            
+            if winner_id:
+                logger.info(f"[CLASSIC] Adding win to {winner_id}: {net_winnings}")
+                update_user_balance(winner_id, net_winnings, "game_win")
+            
+            winner_display = f"@{winner}" if not winner.startswith('user_') else winner
+            result_text = f"🏆 Победитель: {winner_display}"
+            win_text = f"💎 Выигрыш: {net_winnings:.1f} RUB (комиссия 5%: {fee:.1f} RUB)"
+        else:
+            winners_display = []
+            for w in winners:
+                winners_display.append(f"@{w}" if not w.startswith('user_') else w)
+            result_text = f"🤝 Ничья: " + ", ".join(winners_display)
+            win_text = f"💰 Ставки возвращены"
+            
+            for player_name in game['player_names']:
+                for uid, name in zip(game['players'], game['player_names']):
+                    if name == player_name:
+                        update_user_balance(uid, game['bet'], "game_win")
+        
+        data = load_db()
+        save_db(data)
+        
+        final_text = f"""🎲 {game_name} №{game_id}
+
+{win_text}
+
+👥 Игроки:
+{players_list}
+{result_text}"""
+        
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.error(f"Ошибка удаления: {e}")
+        
+        await bot.send_message(chat_id, final_text)
+        
+        if game_id in data['games']:
+            del data['games'][game_id]
+            save_db(data)
+        
+        logger.info(f"Игра #{game_id} завершена (classic)")
+        
+    except Exception as e:
+        logger.error(f"Ошибка finish_classic_game: {e}", exc_info=True)
+
+async def finish_players_game(game_id, winners):
+
+    try:
+        data = load_db()
+        game = data['games'][game_id]
+        
+        chat_id = game['chat_id']
+        message_id = game['message_id']
+        
+        game_names = {
+            'cub': 'CUBE',
+            'dart': 'DART',
+            'basket': 'BASKET',
+            'bowl': 'BOWLING',
+            'foot': 'FOOTBALL'
+        }
+        game_name = game_names.get(game.get('command', ''), game.get('command', 'GAME').upper())
+        
+        players_list = ""
+        for i, (player_id, player_name) in enumerate(zip(game['players'], game['player_names']), 1):
+            score = game['player_scores'].get(player_name, 0)
+            
+            if player_name.startswith('user_'):
+                player_display = str(player_id)
+            else:
+                player_display = f"@{player_name}"
+            
+            players_list += f"{i} - {player_display} [{score}]\n"
+        
+        pot = game['bet'] * len(game['players'])
+        net_winnings, fee = calculate_winnings_with_fee(pot)
+        
+        if len(winners) == 1:
+            winner = winners[0]
+            winner_id = None
+            for uid, name in zip(game['players'], game['player_names']):
+                if name == winner:
+                    winner_id = uid
+                    break
+            
+            if winner_id:
+                logger.info(f"[PLAYERS] Adding win to {winner_id}: {net_winnings}")
+                update_user_balance(winner_id, net_winnings, "game_win")
+            
+            winner_display = f"@{winner}" if not winner.startswith('user_') else winner
+            result_text = f"🏆 Победитель: {winner_display}"
+            win_text = f"💎 Выигрыш: {net_winnings:.1f} RUB (комиссия 5%: {fee:.1f} RUB)"
+        else:
+            winners_display = []
+            for w in winners:
+                winners_display.append(f"@{w}" if not w.startswith('user_') else w)
+            result_text = f"🤝 Ничья: " + ", ".join(winners_display)
+            win_text = f"💰 Ставки возвращены"
+            
+            for player_name in game['player_names']:
+                for uid, name in zip(game['players'], game['player_names']):
+                    if name == player_name:
+                        update_user_balance(uid, game['bet'], "game_win")
+        
+        data = load_db()
+        save_db(data)
+        
+        final_text = f"""🎲 {game_name} {game['max_players']}P №{game_id}
+
+{win_text}
+
+👥 Игроки:
+{players_list}
+{result_text}"""
+        
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.error(f"Ошибка удаления: {e}")
+        
+        await bot.send_message(chat_id, final_text)
+        
+        if game_id in data['games']:
+            del data['games'][game_id]
+            save_db(data)
+        
+        logger.info(f"Игра #{game_id} завершена (players)")
+        
+    except Exception as e:
+        logger.error(f"Ошибка finish_players_game: {e}", exc_info=True)
+
+async def finish_wins_game(game, winners):
+    try:
+        game_id = game['game_id']
+        chat_id = game['chat_id']
+        message_id = game['message_id']
+        
+        game_names = {
+            'cub': 'CUBE',
+            'dart': 'DART',
+            'basket': 'BASKET',
+            'bowl': 'BOWLING',
+            'foot': 'FOOTBALL'
+        }
+        game_name = game_names.get(game.get('command', ''), game.get('command', 'GAME').upper())
+        target_wins = game.get('target_wins', 1)
+        
+        players_list = ""
+        for i, player_name in enumerate(game.get('player_names', []), 1):
+            wins_count = game.get('player_round_wins', {}).get(player_name, 0)
+            if player_name.startswith('user_'):
+                player_display = str(player_name)
+            else:
+                player_display = f"@{player_name}"
+            players_list += f"{i} - {player_display} [{wins_count}]\n"
+        
+        pot = game['bet'] * len(game['players'])
+        net_winnings, fee = calculate_winnings_with_fee(pot)
+        
+        if len(winners) == 1:
+            winner = winners[0]
+            winner_id = None
+            for uid, name in zip(game['players'], game['player_names']):
+                if name == winner:
+                    winner_id = uid
+                    break
+            
+            if winner_id:
+                logger.info(f"[WINS] Adding win to {winner_id}: {net_winnings}")
+                update_user_balance(winner_id, net_winnings, "game_win")
+            
+            if winner.startswith('user_'):
+                winner_display = str(winner)
+            else:
+                winner_display = f"@{winner}"
+            
+            result_text = f"🏆 Победитель: {winner_display}"
+            win_text = f"💎 Выигрыш: {net_winnings:.1f} RUB (комиссия 5%: {fee:.1f} RUB)"
+        else:
+            winners_display = []
+            for w in winners:
+                if w.startswith('user_'):
+                    winners_display.append(str(w))
+                else:
+                    winners_display.append(f"@{w}")
+            result_text = f"🤝 Ничья: " + ", ".join(winners_display)
+            win_text = f"💰 Ставки возвращены"
+            
+            for player_name in game['player_names']:
+                for uid, name in zip(game['players'], game['player_names']):
+                    if name == player_name:
+                        update_user_balance(uid, game['bet'], "game_win")
+        
+        data = load_db()
+        save_db(data)
+        
+        final_text = f"""🎲 {game_name} {target_wins}X №{game_id}
+
+{win_text}
+
+👥 Игроки:
+{players_list}
+{result_text}"""
+        
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.error(f"Ошибка удаления: {e}")
+        
+        await bot.send_message(chat_id, final_text)
+        
+        data = load_db()
+        if game_id in data['games']:
+            del data['games'][game_id]
+            save_db(data)
+        
+        logger.info(f"Игра #{game_id} завершена (wins)")
+        
+    except Exception as e:
+        logger.error(f"Ошибка finish_wins_game: {e}")
+
+async def check_pending_deposits():
+    while True:
+        try:
+            data = load_db()
+            
+            for deposit in data['deposits']:
+                if deposit['status'] == 'pending':
+                    invoice_id = deposit['invoice_id']
+                    status = await check_invoice_status(invoice_id)
+                    
+                    if status == 'paid':
+                        user_id, amount, success = complete_deposit(invoice_id)
+                        
+                        if success and user_id:
+                            user_data = get_or_create_user(user_id)
+                            
+                            try:
+                                await bot.send_message(
+                                    user_id,
+                                    f"✅ Оплата депозита подтверждена!\n\n"
+                                    f"💰 На ваш баланс зачислено {amount:.2f} RUB\n"
+                                    f"💳 Текущий баланс: {user_data['balance']:.2f} RUB"
+                                )
+                            except Exception as e:
+                                logger.error(f"Ошибка уведомления о депозите: {e}")
+            
+            await asyncio.sleep(60)
+            
+        except Exception as e:
+            logger.error(f"Ошибка в check_pending_deposits: {e}")
+            await asyncio.sleep(10)
+
+async def clean_stale_games():
+
+    while True:
+        try:
+            await asyncio.sleep(60)  
+            
+            data = load_db()
+            games = data.get('games', {})
+            current_time = datetime.now()
+            deleted_count = 0
+            
+            for game_id, game in list(games.items()):
+                if game.get('status') != 'waiting':
+                    continue
+                
+                created_at_str = game.get('created_at')
+                if not created_at_str:
+                    continue
+                
+                try:
+                    created_at = datetime.strptime(created_at_str, "%Y-%m-%d %H:%M:%S")
+                    time_diff = (current_time - created_at).total_seconds() / 60  
+                    
+                    if time_diff > 30:
+                        logger.info(f"[CLEAN] Game #{game_id} is stale ({time_diff:.1f} min), deleting...")
+                        
+                        bet = game.get('bet', 0)
+                        players = game.get('players', [])
+                        player_names = game.get('player_names', [])
+                        chat_id = game.get('chat_id')
+                        
+                        players_list = []
+                        for player_id, player_name in zip(players, player_names):
+                            if player_name.startswith('user_'):
+                                players_list.append(str(player_id))
+                            else:
+                                players_list.append(f"@{player_name}")
+                        
+                        for player_id in players:
+                            success = update_user_balance(player_id, bet, "game_win")
+                            if success:
+                                logger.info(f"[CLEAN] Returned {bet} RUB to player {player_id} from game #{game_id}")
+                            else:
+                                logger.error(f"[CLEAN] Failed to return {bet} RUB to player {player_id}")
+                        
+                        data = load_db()
+                        save_db(data)
+                        
+                        if chat_id:
+                            players_str = ", ".join(players_list)
+                            minutes = int(time_diff)
+                            
+                            notification = (
+                                f"⏰ Игра #{game_id} автоматически удалена\n\n"
+                                f"👥 Игроки: {players_str}\n"
+                                f"⏱ Ожидание: {minutes} минут\n"
+                                f"💰 Ставка {bet} RUB возвращена на баланс каждому игроку\n\n"
+                                f"💡 Создайте новую игру командой /cub <ставка>"
+                            )
+                            
+                            try:
+                                await bot.send_message(chat_id, notification)
+                                logger.info(f"[CLEAN] Sent notification to chat {chat_id}")
+                            except Exception as e:
+                                logger.error(f"[CLEAN] Failed to send notification: {e}")
+                        
+                        try:
+                            if game.get('message_id'):
+                                await bot.delete_message(
+                                    chat_id=chat_id,
+                                    message_id=game['message_id']
+                                )
+                        except Exception as e:
+                            logger.error(f"[CLEAN] Error deleting message: {e}")
+                        
+                        if game_id in data['games']:
+                            del data['games'][game_id]
+                            deleted_count += 1
+                        
+                except Exception as e:
+                    logger.error(f"[CLEAN] Error processing game #{game_id}: {e}")
+            
+            if deleted_count > 0:
+                save_db(data)
+                logger.info(f"[CLEAN] Deleted {deleted_count} stale games")
+                
+        except Exception as e:
+            logger.error(f"[CLEAN] Error in clean_stale_games: {e}", exc_info=True)
+            await asyncio.sleep(60)
+async def main():
+    logger.info("Бот запущен")
+    logger.info(f"Админ: {ADMIN_ID}")
+    logger.info(f"Минимальный вывод: {MIN_WITHDRAWAL} RUB")
+    logger.info(f"Проверка админа от: {THRESHOLD} RUB")
+    logger.info(f"Курс: 1 USDT = {USDT_RATE} RUB")
+    
+    asyncio.create_task(check_pending_deposits())
+    asyncio.create_task(clean_stale_games()) 
+    
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
