@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 GROUP_LINK = "https://t.me/+iQnjriiA_z8wNDMy"
 NOTIFICATION_CHAT_ID = -1003849301229
 
-BOT_TOKEN = "7998002114:AAEBVNE45mo3tmCbLjx2hSkEwNglJf-ZaQs"
+BOT_TOKEN = "8269822827:AAE2PT7b7SWgqoWMw6-oS_8el3ub3Xu_6Hk"
 CRYPTOBOT_API_TOKEN = "562662:AApFtKjizEzph6lWXLH21PbVh60nQiYfCgc"
 ADMIN_ID = 1164671444
 
@@ -164,86 +164,116 @@ def calculate_winnings_with_fee(pot):
     net_winnings = pot - fee
     return net_winnings, fee
 
-def update_user_balance(user_id, amount, transaction_type="deposit", **kwargs):
-    data = load_db()
-    user_id_str = str(user_id)
-    
-    logger.info(f"[BALANCE] {user_id_str} {transaction_type} {amount}")
-    
-    if user_id_str not in data['menu_users']:
-        logger.error(f"[BALANCE] User {user_id_str} not found!")
-        return False
-    
-    user_data = data['menu_users'][user_id_str]
-    old_balance = user_data['balance']
-    
-    if transaction_type == "deposit":
-        user_data['balance'] += amount
-        user_data['total_deposited'] += amount
-    elif transaction_type == "withdraw":
-        if user_data['balance'] >= amount:
-            user_data['balance'] -= amount
-            user_data['total_withdrawn'] += amount
-        else:
-            return False
-    elif transaction_type == "game_bet":
-        if user_data['balance'] >= amount:
-            user_data['balance'] -= amount
-            user_data['total_spent'] += amount
-        else:
-            return False
-    elif transaction_type == "game_win":
-        user_data['balance'] += amount
-    elif transaction_type == "gift_sent":
-        if user_data['balance'] >= amount:
-            user_data['balance'] -= amount
-        else:
-            return False
-    elif transaction_type == "gift_received":
-        user_data['balance'] += amount
-    elif transaction_type == "promo":
-        user_data['balance'] += amount
-    elif transaction_type == "deposit_completed":
-        user_data['balance'] += amount
-        user_data['total_deposited'] += amount
-    elif transaction_type == "referral_bonus":
-        user_data['balance'] += amount
-    else:
-        logger.error(f"[BALANCE] Unknown type: {transaction_type}")
-        return False
-    
-    transaction = {
-        'user_id': user_id_str,
-        'type': transaction_type,
-        'amount': amount,
-        'old_balance': old_balance,
-        'new_balance': user_data['balance'],
-        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    for key, value in kwargs.items():
-        if value is not None:
-            transaction[key] = value
-    
-    data['transactions'].append(transaction)
-    
-    save_success = save_db(data)
-    
-    if save_success:
-        logger.info(f"[BALANCE] OK: {old_balance} -> {user_data['balance']} (+{amount})")
-        return True
-    else:
-        logger.error(f"[BALANCE] FAILED to save!")
-        return False
+import threading
+_db_lock = threading.Lock()
 
-def get_user_balance(user_id):
-    data = load_db()
+def update_user_balance(user_id, amount, transaction_type="deposit", **kwargs):
+    with _db_lock: 
+        try:
+            data = load_db()
+            user_id_str = str(user_id)
+            
+            logger.info(f"[BALANCE] {user_id_str} {transaction_type} {amount}")
+            
+            if user_id_str not in data['menu_users']:
+                logger.error(f"[BALANCE] User {user_id_str} not found!")
+                return False
+            
+            user_data = data['menu_users'][user_id_str]
+            old_balance = user_data['balance']
+            
+            if transaction_type in ["deposit", "deposit_completed", "promo", "game_win", 
+                                    "gift_received", "referral_bonus"]:
+                user_data['balance'] += amount
+                
+                if transaction_type in ["deposit", "deposit_completed"]:
+                    user_data['total_deposited'] = user_data.get('total_deposited', 0) + amount
+                    
+            elif transaction_type in ["withdraw", "game_bet", "gift_sent"]:
+                if user_data['balance'] >= amount:
+                    user_data['balance'] -= amount
+                    
+                    if transaction_type == "withdraw":
+                        user_data['total_withdrawn'] = user_data.get('total_withdrawn', 0) + amount
+                    elif transaction_type == "game_bet":
+                        user_data['total_spent'] = user_data.get('total_spent', 0) + amount
+                else:
+                    logger.warning(f"[BALANCE] Insufficient funds: {old_balance} < {amount}")
+                    return False
+            else:
+                logger.error(f"[BALANCE] Unknown type: {transaction_type}")
+                return False
+            
+            transaction = {
+                'user_id': user_id_str,
+                'type': transaction_type,
+                'amount': amount,
+                'old_balance': old_balance,
+                'new_balance': user_data['balance'],
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  
+            }
+            
+            for key, value in kwargs.items():
+                if value is not None:
+                    transaction[key] = value
+            
+            data['transactions'].append(transaction)
+            
+            if save_db(data):
+                logger.info(f"[BALANCE] OK: {old_balance} -> {user_data['balance']} ({transaction_type}, {amount})")
+                
+                fresh_data = load_db()
+                fresh_balance = fresh_data['menu_users'][user_id_str]['balance']
+                
+                if fresh_balance != user_data['balance']:
+                    logger.error(f"[BALANCE] VERIFICATION FAILED! Expected {user_data['balance']}, got {fresh_balance}")
+                    fresh_data['menu_users'][user_id_str]['balance'] = user_data['balance']
+                    save_db(fresh_data)
+                
+                return True
+            else:
+                logger.error(f"[BALANCE] Save failed!")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[BALANCE] ERROR: {e}", exc_info=True)
+            return False
+
+_balance_cache = {}
+_cache_ttl = 5 
+
+def get_user_balance(user_id, force_refresh=False):
     user_id_str = str(user_id)
+    current_time = datetime.now().timestamp()
     
-    if user_id_str in data['menu_users']:
-        return data['menu_users'][user_id_str]['balance']
+    if not force_refresh and user_id_str in _balance_cache:
+        cached_data = _balance_cache[user_id_str]
+        if current_time - cached_data['timestamp'] < _cache_ttl:
+            return cached_data['balance']
+    
+    with _db_lock:
+        data = load_db()
+        
+        if user_id_str not in data['menu_users']:
+            get_or_create_user(user_id)
+            data = load_db()
+        
+        balance = data['menu_users'][user_id_str]['balance']
+        
+        _balance_cache[user_id_str] = {
+            'balance': balance,
+            'timestamp': current_time
+        }
+        
+        return balance
+
+def invalidate_balance_cache(user_id=None):
+    global _balance_cache
+    if user_id:
+        user_id_str = str(user_id)
+        _balance_cache.pop(user_id_str, None)
     else:
-        user_data = get_or_create_user(user_id)
-        return user_data['balance']
+        _balance_cache.clear()
 
 def get_bottom_menu():
     keyboard = [
@@ -272,53 +302,60 @@ def create_promocode(code, amount, uses_left=1):
 
 def use_promocode(code, user_id):
     try:
-        data = load_db()
-        code = code.upper()
-        user_id_str = str(user_id)
-        
-        if code not in data['promocodes']:
-            return None, "❌ Промокод не найден"
-        
-        promocode = data['promocodes'][code]
-        
-        uses_left = promocode.get('uses_left', 0)
-        if uses_left == 0:
-            return None, "❌ Промокод уже использован максимальное количество раз"
-        
-        used_by = promocode.get('used_by', [])
-        if user_id_str in used_by:
-            return None, "❌ Вы уже использовали этот промокод"
-        
-        amount = promocode['amount']
-        
-        if user_id_str not in data['menu_users']:
-            get_or_create_user(user_id)
+        with _db_lock: 
             data = load_db()
-        
-        old_balance = data['menu_users'][user_id_str]['balance']
-        data['menu_users'][user_id_str]['balance'] += amount
-        
-        data['transactions'].append({
-            'user_id': user_id_str,
-            'type': 'promo',
-            'amount': amount,
-            'old_balance': old_balance,
-            'new_balance': data['menu_users'][user_id_str]['balance'],
-            'promocode': code,
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-        
-        promocode['used_by'].append(user_id_str)
-        promocode['uses_left'] = uses_left - 1
-        
-        if 'used_promocodes' not in data['menu_users'][user_id_str]:
-            data['menu_users'][user_id_str]['used_promocodes'] = []
-        if code not in data['menu_users'][user_id_str]['used_promocodes']:
-            data['menu_users'][user_id_str]['used_promocodes'].append(code)
-        
-        save_db(data)
-        
-        return amount, f"✅ Промокод активирован! +{amount} RUB"
+            code = code.upper()
+            user_id_str = str(user_id)
+
+            if code not in data['promocodes']:
+                return None, "❌ Промокод не найден"
+            
+            promocode = data['promocodes'][code]
+            
+            uses_left = promocode.get('uses_left', 0)
+            if uses_left == 0:
+                return None, "❌ Промокод уже использован"
+            
+            used_by = promocode.get('used_by', [])
+            if user_id_str in used_by:
+                return None, "❌ Вы уже использовали этот промокод"
+            
+            amount = promocode['amount']
+
+            if user_id_str not in data['menu_users']:
+                get_or_create_user(user_id)
+                data = load_db()
+            
+            old_balance = data['menu_users'][user_id_str]['balance']
+            data['menu_users'][user_id_str]['balance'] += amount
+            
+            data['transactions'].append({
+                'user_id': user_id_str,
+                'type': 'promo',
+                'amount': amount,
+                'old_balance': old_balance,
+                'new_balance': data['menu_users'][user_id_str]['balance'],
+                'promocode': code,
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            })
+            
+            promocode['used_by'].append(user_id_str)
+            promocode['uses_left'] = uses_left - 1
+            
+            if 'used_promocodes' not in data['menu_users'][user_id_str]:
+                data['menu_users'][user_id_str]['used_promocodes'] = []
+            if code not in data['menu_users'][user_id_str]['used_promocodes']:
+                data['menu_users'][user_id_str]['used_promocodes'].append(code)
+            
+            if save_db(data):
+                invalidate_balance_cache(user_id)  
+                
+                fresh_data = load_db()
+                new_balance = fresh_data['menu_users'][user_id_str]['balance']
+                
+                return amount, f"✅ Промокод активирован! +{amount} RUB\n💰 Ваш баланс: {new_balance:.2f} RUB"
+            else:
+                return None, "❌ Ошибка сохранения"
         
     except Exception as e:
         logger.error(f"Ошибка промокода: {e}", exc_info=True)
@@ -554,10 +591,7 @@ async def cmd_promo(message: types.Message, command: CommandObject):
     else:
         user_data = get_or_create_user(message.from_user.id, message.from_user.username or "")
         
-        await message.answer(
-            f"{message_text}\n\n"
-            f"💰 Ваш текущий баланс: {user_data['balance']:.2f} RUB"
-        )
+        await message.answer(f"{message_text}")
 
 @dp.message(Command("ref"))
 async def cmd_ref(message: types.Message):
@@ -1107,14 +1141,7 @@ async def support_reply_button(message: Message):
 
 @dp.message(Command("bal", "бал"))
 async def cmd_balance(message: Message):
-    data = load_db()
-    user_id_str = str(message.from_user.id)
-    
-    if user_id_str in data['menu_users']:
-        balance = data['menu_users'][user_id_str]['balance']
-    else:
-        balance = 0
-    
+    balance = get_user_balance(message.from_user.id, force_refresh=True)
     await message.reply(f"💰 Баланс: {balance:.2f} RUB")
 
 @dp.message(Command("del"))
